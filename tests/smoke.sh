@@ -29,6 +29,17 @@ assert_contains() {
   esac
 }
 
+assert_not_contains() {
+  local haystack needle message
+  haystack=$1
+  needle=$2
+  message=$3
+  case "$haystack" in
+    *"$needle"*) fail "$message\nunexpected: $needle\nin: $haystack" ;;
+    *) ;;
+  esac
+}
+
 make_repo() {
   local base repo
   base=$(mktemp -d)
@@ -96,6 +107,91 @@ EOF
   printf '%s\n' "$dir"
 }
 
+make_fake_devtools_bin() {
+  local dir
+  dir=$(mktemp -d)
+  cat >"$dir/fake-devtools" <<'EOF'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+port = int(sys.argv[1])
+ready_delay = float(os.environ.get("WT_TEST_DEVTOOLS_READY_DELAY", "0"))
+if ready_delay > 0:
+    time.sleep(ready_delay)
+
+log_path = os.environ.get("WT_TEST_DEVTOOLS_LOG", "")
+
+
+def log_request(method: str, url: str) -> None:
+    if not log_path:
+        return
+    with open(log_path, "a", encoding="utf-8") as handle:
+        handle.write(f"{method}\t{url}\n")
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/json/version":
+            payload = {
+                "Browser": "FakeChrome/1.0",
+                "webSocketDebuggerUrl": f"ws://127.0.0.1:{port}/devtools/browser/fake",
+            }
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if parsed.path == "/json/new":
+            url = urllib.parse.unquote(parsed.query)
+            log_request("GET", url)
+            payload = {"id": "page-1", "url": url}
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
+    def do_PUT(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/json/new":
+            url = urllib.parse.unquote(parsed.query)
+            log_request("PUT", url)
+            payload = {"id": "page-1", "url": url}
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+
+HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+EOF
+  chmod +x "$dir/fake-devtools"
+  printf '%s\n' "$dir/fake-devtools"
+}
+
 make_fake_browser_bin() {
   local dir
   dir=$(mktemp -d)
@@ -117,7 +213,7 @@ for arg in "$@"; do
 done
 
 if [ -n "$port" ] && [ "${WT_TEST_BROWSER_AUTOLISTEN:-}" = "1" ]; then
-  python3 -m http.server "$port" --bind 127.0.0.1 >/dev/null 2>&1 &
+  "${WT_TEST_FAKE_DEVTOOLS_BIN:?WT_TEST_FAKE_DEVTOOLS_BIN is required when WT_TEST_BROWSER_AUTOLISTEN=1}" "$port" >/dev/null 2>&1 &
   pid=$!
   if [ "${WT_TEST_BROWSER_PIDS:-}" != "" ]; then
     printf '%s\n' "$pid" >>"$WT_TEST_BROWSER_PIDS"
@@ -377,12 +473,14 @@ test_init_derives_name_for_portless_run() {
 }
 
 test_b_starts_debug_browser_for_current_worktree() {
-  local repo fake_bin chrome_bin browser_log browser_pids debug_port user_data_dir log_line
+  local repo fake_bin chrome_bin devtools_bin browser_log devtools_log browser_pids debug_port user_data_dir log_line
   repo=$(make_repo)
   write_portless_package_json "$repo" "guidance-studio" "portless run --name guidance env -u HOST nuxt dev"
   fake_bin=$(make_fake_portless_bin)
   chrome_bin=$(make_fake_browser_bin)
+  devtools_bin=$(make_fake_devtools_bin)
   browser_log=$(mktemp)
+  devtools_log=$(mktemp)
   browser_pids=$(mktemp)
   debug_port=$(free_port)
   user_data_dir=$(mktemp -d)
@@ -394,6 +492,9 @@ test_b_starts_debug_browser_for_current_worktree() {
     WT_DEBUG_PORT="$debug_port" \
     WT_DEBUG_USER_DATA_DIR="$user_data_dir" \
     WT_TEST_BROWSER_LOG="$browser_log" \
+    WT_TEST_DEVTOOLS_LOG="$devtools_log" \
+    WT_TEST_DEVTOOLS_READY_DELAY=0.2 \
+    WT_TEST_FAKE_DEVTOOLS_BIN="$devtools_bin" \
     WT_TEST_BROWSER_AUTOLISTEN=1 \
     WT_TEST_BROWSER_PIDS="$browser_pids" \
     bash "$ROOT/bin/wt" b >/dev/null
@@ -402,21 +503,24 @@ test_b_starts_debug_browser_for_current_worktree() {
   log_line=$(cat "$browser_log")
   assert_contains "$log_line" "--remote-debugging-port=$debug_port" "wt b should launch Chrome with the fixed debug port"
   assert_contains "$log_line" "--user-data-dir=$user_data_dir" "wt b should launch Chrome with the configured userDataDir"
-  assert_contains "$log_line" "https://guidance.localhost:1355" "wt b should open the current worktree URL"
+  assert_not_contains "$log_line" "https://guidance.localhost:1355" "wt b should not pass the target URL on the initial Chrome launch"
+  assert_contains "$(cat "$devtools_log")" $'\thttps://guidance.localhost:1355' "wt b should open the current worktree URL through DevTools"
   cleanup_pids_file "$browser_pids"
 }
 
 test_b_reuses_debug_browser_for_requested_worktree() {
-  local repo fake_bin chrome_bin browser_log debug_port server_pid
+  local repo fake_bin chrome_bin devtools_bin browser_log devtools_log debug_port server_pid
   repo=$(make_repo)
   write_portless_package_json "$repo" "guidance-studio" "portless myapp pnpm dev"
   commit_repo_state "$repo" "add package"
   git -C "$repo" worktree add "${repo}__worktrees/feature-test" -b feature/test >/dev/null
   fake_bin=$(make_fake_portless_bin)
   chrome_bin=$(make_fake_browser_bin)
+  devtools_bin=$(make_fake_devtools_bin)
   browser_log=$(mktemp)
+  devtools_log=$(mktemp)
   debug_port=$(free_port)
-  python3 -m http.server "$debug_port" --bind 127.0.0.1 >/dev/null 2>&1 &
+  WT_TEST_DEVTOOLS_LOG="$devtools_log" "$devtools_bin" "$debug_port" >/dev/null 2>&1 &
   server_pid=$!
 
   (
@@ -431,7 +535,41 @@ test_b_reuses_debug_browser_for_requested_worktree() {
   sleep 0.2
   kill "$server_pid" >/dev/null 2>&1 || true
   wait "$server_pid" 2>/dev/null || true
-  assert_eq "https://feature-test.myapp.localhost:1355" "$(cat "$browser_log")" "wt b should reuse the browser and open the requested worktree URL"
+  assert_eq "" "$(cat "$browser_log")" "wt b should not relaunch Chrome when a reusable debug browser already exists"
+  assert_contains "$(cat "$devtools_log")" $'\thttps://feature-test.myapp.localhost:1355' "wt b should open the requested worktree URL through DevTools reuse"
+}
+
+test_b_rejects_non_devtools_listener_on_debug_port() {
+  local repo fake_bin chrome_bin browser_log debug_port server_pid output
+  repo=$(make_repo)
+  write_portless_package_json "$repo" "guidance-studio" "portless myapp pnpm dev"
+  commit_repo_state "$repo" "add package"
+  git -C "$repo" worktree add "${repo}__worktrees/feature-test" -b feature/test >/dev/null
+  fake_bin=$(make_fake_portless_bin)
+  chrome_bin=$(make_fake_browser_bin)
+  browser_log=$(mktemp)
+  debug_port=$(free_port)
+  python3 -m http.server "$debug_port" --bind 127.0.0.1 >/dev/null 2>&1 &
+  server_pid=$!
+
+  if output=$(
+    cd "$repo" && \
+    PATH="$fake_bin:$PATH" \
+    WT_CHROME_BIN="$chrome_bin" \
+    WT_DEBUG_PORT="$debug_port" \
+    WT_TEST_BROWSER_LOG="$browser_log" \
+    bash "$ROOT/bin/wt" b feature/test 2>&1 >/dev/null
+  ); then
+    kill "$server_pid" >/dev/null 2>&1 || true
+    wait "$server_pid" 2>/dev/null || true
+    fail "wt b should fail when the debug port is occupied by a non-DevTools listener"
+  fi
+
+  sleep 0.2
+  kill "$server_pid" >/dev/null 2>&1 || true
+  wait "$server_pid" 2>/dev/null || true
+  assert_contains "$output" "Debug port $debug_port is already in use by a non-reusable service" "wt b should explain why a non-DevTools listener cannot be reused"
+  assert_eq "" "$(cat "$browser_log")" "wt b should not launch Chrome when the debug port is occupied by a non-DevTools listener"
 }
 
 test_new_runs_init_for_portless_worktree() {
@@ -459,6 +597,7 @@ test_init_preserves_unrelated_configs_and_removes_browser_launch
 test_init_derives_name_for_portless_run
 test_b_starts_debug_browser_for_current_worktree
 test_b_reuses_debug_browser_for_requested_worktree
+test_b_rejects_non_devtools_listener_on_debug_port
 test_new_runs_init_for_portless_worktree
 
 printf 'smoke tests passed\n'
