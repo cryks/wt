@@ -13,16 +13,16 @@ It keeps the behavior conservative:
 
 ## Install
 
-Add `/Users/rbr/work/wt/bin` to your `PATH`:
+Add this repository's `bin` directory to your `PATH`:
 
 ```bash
-export PATH="/Users/rbr/work/wt/bin:$PATH"
+export PATH="$(pwd)/bin:$PATH"
 ```
 
 Optional shell helper if you want `cd` behavior in Bash or zsh:
 
 ```bash
-source "/Users/rbr/work/wt/shell/wt.bash"
+source "$(pwd)/shell/wt.bash"
 ```
 
 After sourcing that file, `wt cd <name>` changes into the linked worktree in your current shell,
