@@ -623,6 +623,27 @@ test_new_without_args_accepts_opencode_suggestion() {
   assert_contains "$prompt_log" "Return exactly one Git branch name and nothing else." "wt new without args should constrain the OpenCode response"
 }
 
+test_new_without_args_honors_branch_name_model_override() {
+  local repo fake_bin opencode_log output prompt_log
+  repo=$(make_repo)
+  fake_bin=$(make_fake_opencode_bin)
+  opencode_log=$(mktemp)
+
+  output=$(
+    cd "$repo" && \
+      PATH="$fake_bin:$PATH" \
+      WT_BRANCH_NAME_MODEL="opencode-go/test-branch-model" \
+      WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
+      WT_TEST_OPENCODE_LOG="$opencode_log" \
+      run_in_pty $'add a guided onboarding flow\n\nn\n' bash "$ROOT/bin/wt" new
+  )
+
+  assert_file_exists "${repo}__worktrees/feat-generated-branch" "wt new without args should create the suggested worktree when the branch-name model is overridden"
+  assert_contains "$output" "branch: feat/generated-branch" "wt new without args should still use the suggested branch when the branch-name model is overridden"
+  prompt_log=$(cat "$opencode_log")
+  assert_contains "$prompt_log" "opencode-go/test-branch-model" "wt new without args should honor WT_BRANCH_NAME_MODEL for branch suggestions"
+}
+
 test_new_without_args_allows_editing_suggestion() {
   local repo fake_bin output opencode_log
   repo=$(make_repo)
@@ -1852,6 +1873,7 @@ test_cd_matches_open
 test_wrapper_cd_changes_directory
 test_wrapper_new_changes_directory
 test_new_without_args_accepts_opencode_suggestion
+test_new_without_args_honors_branch_name_model_override
 test_new_without_args_allows_editing_suggestion
 test_new_without_args_handles_multibyte_backspace_in_goal_prompt
 test_new_without_args_keeps_goal_prompt_visible_after_excess_backspace
