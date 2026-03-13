@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ENV_CANDIDATES=(".env" ".env.local" ".env.development.local")
+WT_MANAGED_LAUNCH_NAME="wt: attach browser"
+WT_DEBUG_PORT_DEFAULT="9222"
 
 die() {
   printf '%s\n' "$*" >&2
@@ -22,6 +24,8 @@ wt - thin git worktree helper for Node.js repositories
 
 Usage:
   wt new <branch>
+  wt init
+  wt b [branch-or-handle]
   wt cd <branch-or-handle>
   wt open <branch-or-handle>
   wt rm [--force] <branch-or-handle>
@@ -30,6 +34,8 @@ Usage:
 
 Commands:
   new    Create or attach a worktree in <repo>__worktrees/<handle>
+  init   Generate or update .vscode/launch.json for the current worktree
+  b      Open the current or requested worktree in the debug browser
   cd     Print the absolute path for a linked worktree
   open   Print the absolute path for a linked worktree
   rm     Remove a linked worktree conservatively
@@ -57,16 +63,43 @@ get_repo_root() {
   git rev-parse --show-toplevel
 }
 
+get_main_repo_root() {
+  local common_dir
+  common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || git rev-parse --git-common-dir)
+  common_dir=$(cd "$common_dir" && pwd -P)
+  dirname "$common_dir"
+}
+
 get_repo_name() {
-  basename "$(get_repo_root)"
+  basename "$(get_main_repo_root)"
 }
 
 get_worktree_root() {
   local repo_root parent_dir repo_name
-  repo_root=$(get_repo_root)
+  repo_root=$(get_main_repo_root)
   parent_dir=$(dirname "$repo_root")
   repo_name=$(basename "$repo_root")
   printf '%s\n' "$parent_dir/${repo_name}__worktrees"
+}
+
+get_debug_port() {
+  local port
+  port=${WT_DEBUG_PORT-$WT_DEBUG_PORT_DEFAULT}
+  case "$port" in
+    ''|*[!0-9]*) die "Invalid WT_DEBUG_PORT: $port" ;;
+  esac
+  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || die "Invalid WT_DEBUG_PORT: $port"
+  printf '%s\n' "$port"
+}
+
+get_debug_user_data_dir() {
+  if [ -n "${WT_DEBUG_USER_DATA_DIR-}" ]; then
+    printf '%s\n' "$WT_DEBUG_USER_DATA_DIR"
+    return 0
+  fi
+
+  [ -n "${HOME-}" ] || die "HOME is required to resolve the debug browser userDataDir"
+  printf '%s\n' "$HOME/.vscode/chrome"
 }
 
 trim_leading_dashes() {
@@ -138,6 +171,389 @@ detect_package_manager() {
     bun@*) printf '%s\n' "bun" ;;
     *) printf '%s\n' "" ;;
   esac
+}
+
+require_python3() {
+  require_command python3
+}
+
+inspect_portless_dev_script() {
+  local target_root
+  target_root=$1
+  require_python3
+
+  python3 - "$target_root" <<'PY'
+import json
+import os
+import re
+import shlex
+import sys
+
+target_root = sys.argv[1]
+package_json = os.path.join(target_root, "package.json")
+with open(package_json, "r", encoding="utf-8") as handle:
+    data = json.load(handle)
+
+scripts = data.get("scripts") or {}
+dev = scripts.get("dev")
+if not isinstance(dev, str) or not dev.strip():
+    raise SystemExit("package.json does not contain a non-empty scripts.dev command")
+
+tokens = shlex.split(dev, posix=True)
+assignment_pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+index = 0
+while index < len(tokens) and assignment_pattern.match(tokens[index]):
+    index += 1
+
+if index >= len(tokens) or os.path.basename(tokens[index]) != "portless":
+    raise SystemExit("scripts.dev is not a portless command")
+
+index += 1
+reserved = {"run", "get", "alias", "hosts", "list", "trust", "proxy"}
+
+def take_value(token_index):
+    if token_index + 1 >= len(tokens):
+        raise SystemExit("Missing value for portless option")
+    value = tokens[token_index + 1]
+    if not value or value.startswith("-"):
+        raise SystemExit("Missing value for portless option")
+    return value, token_index + 2
+
+if index < len(tokens) and tokens[index] == "run":
+    index += 1
+    explicit_name = ""
+    while index < len(tokens):
+      token = tokens[index]
+      if token == "--":
+          break
+      if token == "--name":
+          explicit_name, index = take_value(index)
+          continue
+      if token in {"--force", "--https", "--no-tls", "--foreground"}:
+          index += 1
+          continue
+      if token in {"--app-port", "--port", "-p", "--cert", "--key", "--tld"}:
+          _, index = take_value(index)
+          continue
+      if token.startswith("-"):
+          raise SystemExit(f"Unsupported portless run option in scripts.dev: {token}")
+      break
+
+    if explicit_name:
+        print(f"explicit\t{explicit_name}")
+    else:
+        print("infer\t")
+    raise SystemExit(0)
+
+explicit_name = ""
+while index < len(tokens) and tokens[index].startswith("-"):
+    token = tokens[index]
+    if token == "--name":
+        explicit_name, index = take_value(index)
+        continue
+    if token in {"--force", "--https", "--no-tls", "--foreground"}:
+        index += 1
+        continue
+    if token in {"--app-port", "--port", "-p", "--cert", "--key", "--tld"}:
+        _, index = take_value(index)
+        continue
+    if token == "--":
+        index += 1
+        break
+    raise SystemExit(f"Unsupported portless option in scripts.dev: {token}")
+
+if explicit_name:
+    print(f"explicit\t{explicit_name}")
+    raise SystemExit(0)
+
+if index >= len(tokens):
+    raise SystemExit("Unable to determine the portless app name from scripts.dev")
+
+name = tokens[index]
+if name in reserved:
+    raise SystemExit(f"Reserved portless subcommand used without --name: {name}")
+
+print(f"explicit\t{name}")
+PY
+}
+
+infer_portless_base_name() {
+  local target_root
+  target_root=$1
+  require_python3
+
+  python3 - "$target_root" <<'PY'
+import json
+import os
+import subprocess
+import sys
+
+target_root = os.path.abspath(sys.argv[1])
+
+cursor = target_root
+while True:
+    package_json = os.path.join(cursor, "package.json")
+    if os.path.isfile(package_json):
+        try:
+            with open(package_json, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"Invalid JSON in {package_json}: {exc}")
+        name = data.get("name")
+        if isinstance(name, str) and name.strip():
+            print(name.strip())
+            raise SystemExit(0)
+    parent = os.path.dirname(cursor)
+    if parent == cursor:
+        break
+    cursor = parent
+
+try:
+    common_dir = subprocess.check_output(
+        ["git", "-C", target_root, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        text=True,
+        stderr=subprocess.DEVNULL,
+    ).strip()
+except subprocess.CalledProcessError:
+    common_dir = ""
+
+if common_dir:
+    repo_root = os.path.dirname(os.path.realpath(common_dir))
+    repo_name = os.path.basename(repo_root)
+    if repo_name:
+        print(repo_name)
+        raise SystemExit(0)
+
+basename = os.path.basename(target_root)
+if basename:
+    print(basename)
+    raise SystemExit(0)
+
+raise SystemExit("Unable to infer a portless app name for this worktree")
+PY
+}
+
+derive_portless_base_name() {
+  local target_root mode explicit_name
+  target_root=$1
+  IFS=$'\t' read -r mode explicit_name <<EOF
+$(inspect_portless_dev_script "$target_root")
+EOF
+
+  case "$mode" in
+    explicit)
+      [ -n "$explicit_name" ] || die "Unable to determine the explicit portless app name for: $target_root"
+      printf '%s\n' "$explicit_name"
+      ;;
+    infer)
+      infer_portless_base_name "$target_root"
+      ;;
+    *)
+      die "Unable to derive a portless app name for: $target_root"
+      ;;
+  esac
+}
+
+derive_portless_url() {
+  local target_root base_name url
+  target_root=$1
+  base_name=$(derive_portless_base_name "$target_root")
+  require_command portless
+  url=$(cd "$target_root" && portless get "$base_name") || die "Failed to derive a portless URL from package.json scripts.dev in: $target_root"
+  [ -n "$url" ] || die "portless get returned an empty URL for: $target_root"
+  printf '%s\n' "$url"
+}
+
+update_launch_json() {
+  local target_root url managed_name debug_port launch_path vscode_dir
+  target_root=$1
+  url=$2
+  managed_name=$3
+  debug_port=$4
+  require_python3
+
+  vscode_dir="$target_root/.vscode"
+  launch_path="$vscode_dir/launch.json"
+  mkdir -p "$vscode_dir"
+
+  python3 - "$launch_path" "$url" "$managed_name" "$debug_port" <<'PY'
+import json
+import os
+import sys
+
+launch_path, url, managed_name, debug_port = sys.argv[1:5]
+browser_launch_types = {"chrome", "msedge", "edge", "pwa-chrome", "pwa-msedge"}
+
+if os.path.exists(launch_path):
+    try:
+        with open(launch_path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Invalid JSON in {launch_path}: {exc}")
+else:
+    data = {}
+
+if not isinstance(data, dict):
+    raise SystemExit(f"{launch_path} must contain a JSON object")
+
+configs = data.get("configurations")
+if configs is None:
+    configs = []
+if not isinstance(configs, list):
+    raise SystemExit(f"{launch_path} must contain a configurations array")
+
+managed = {
+    "type": "chrome",
+    "request": "attach",
+    "name": managed_name,
+    "address": "localhost",
+    "port": int(debug_port),
+    "url": url,
+    "webRoot": "${workspaceFolder}",
+    "resolveSourceMapLocations": [
+        "${workspaceFolder}/**",
+        "!**/node_modules/**",
+    ],
+    "internalConsoleOptions": "neverOpen",
+    "presentation": {
+        "group": "wt",
+        "order": 1,
+    },
+}
+
+new_configs = [managed]
+for config in configs:
+    if not isinstance(config, dict):
+        new_configs.append(config)
+        continue
+    if config.get("name") == managed_name:
+        continue
+    if config.get("request") == "launch" and config.get("type") in browser_launch_types:
+        continue
+    new_configs.append(config)
+
+data["version"] = data.get("version", "0.2.0")
+data["configurations"] = new_configs
+
+with open(launch_path, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, indent=2)
+    handle.write("\n")
+PY
+}
+
+initialize_worktree_debug_config() {
+  local target_root url debug_port
+  target_root=$1
+  url=$(derive_portless_url "$target_root")
+  debug_port=$(get_debug_port)
+  update_launch_json "$target_root" "$url" "$WT_MANAGED_LAUNCH_NAME" "$debug_port"
+  note "launch_json: $target_root/.vscode/launch.json"
+  note "debug_url: $url"
+  note "debug_port: $debug_port"
+}
+
+resolve_target_root_or_current() {
+  if [ $# -eq 0 ]; then
+    require_git_repo
+    get_repo_root
+    return 0
+  fi
+
+  [ $# -eq 1 ] || die "Expected zero or one branch-or-handle argument"
+  require_git_repo
+  resolve_worktree_target "$1"
+  printf '%s\n' "${WT_PATHS[$WT_TARGET_INDEX]}"
+}
+
+debug_port_is_listening() {
+  local port
+  port=$1
+  require_python3
+
+  python3 - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.settimeout(0.2)
+try:
+    sock.connect(("127.0.0.1", port))
+except OSError:
+    raise SystemExit(1)
+finally:
+    sock.close()
+PY
+}
+
+wait_for_debug_port() {
+  local port attempts
+  port=$1
+  attempts=${2:-40}
+  while [ "$attempts" -gt 0 ]; do
+    if debug_port_is_listening "$port"; then
+      return 0
+    fi
+    sleep 0.1
+    attempts=$((attempts - 1))
+  done
+  return 1
+}
+
+resolve_chrome_binary() {
+  local candidate
+  if [ -n "${WT_CHROME_BIN-}" ]; then
+    [ -x "$WT_CHROME_BIN" ] || die "WT_CHROME_BIN is not executable: $WT_CHROME_BIN"
+    printf '%s\n' "$WT_CHROME_BIN"
+    return 0
+  fi
+
+  for candidate in google-chrome google-chrome-stable chromium chromium-browser chrome; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+
+  for candidate in \
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+    "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing" \
+    "/Applications/Chromium.app/Contents/MacOS/Chromium"; do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  die "Could not find a Chrome-compatible browser. Set WT_CHROME_BIN to override."
+}
+
+launch_debug_browser_for_url() {
+  local url chrome_bin debug_port user_data_dir
+  url=$1
+  chrome_bin=$(resolve_chrome_binary)
+  debug_port=$(get_debug_port)
+  user_data_dir=$(get_debug_user_data_dir)
+  mkdir -p "$user_data_dir"
+
+  if debug_port_is_listening "$debug_port"; then
+    "$chrome_bin" "$url" >/dev/null 2>&1 &
+    note "browser: reused"
+    return 0
+  fi
+
+  "$chrome_bin" \
+    --remote-debugging-port="$debug_port" \
+    --user-data-dir="$user_data_dir" \
+    --no-first-run \
+    --no-default-browser-check \
+    "$url" >/dev/null 2>&1 &
+
+  if ! wait_for_debug_port "$debug_port"; then
+    die "Debug browser did not expose port $debug_port. Ensure no other Chrome is already using $user_data_dir"
+  fi
+
+  note "browser: started"
 }
 
 copy_env_candidates_from_notes() {
@@ -259,7 +675,7 @@ append_worktree_record() {
 
 list_worktrees() {
   local repo_root worktree_root entry path branch annotation token key value
-  repo_root=$(get_repo_root)
+  repo_root=$(get_main_repo_root)
   worktree_root=$(get_worktree_root)
 
   WT_COUNT=0
@@ -430,13 +846,29 @@ cmd_ls() {
   done
 }
 
+cmd_init() {
+  local target_root
+  [ $# -eq 0 ] || die "Usage: wt init"
+  target_root=$(resolve_target_root_or_current)
+  initialize_worktree_debug_config "$target_root"
+}
+
+cmd_b() {
+  local target_root url
+  [ $# -le 1 ] || die "Usage: wt b [branch-or-handle]"
+  target_root=$(resolve_target_root_or_current "$@")
+  url=$(derive_portless_url "$target_root")
+  launch_debug_browser_for_url "$url"
+  note "debug_url: $url"
+}
+
 cmd_new() {
   local branch repo_root worktree_root handle target_path env_copied package_manager i
   [ $# -eq 1 ] || die "Usage: wt new <branch>"
   branch=$1
   require_git_repo
 
-  repo_root=$(get_repo_root)
+  repo_root=$(get_main_repo_root)
   worktree_root=$(get_worktree_root)
   handle=$(normalize_handle "$branch")
   target_path="$worktree_root/$handle"
@@ -461,6 +893,11 @@ cmd_new() {
   fi
 
   env_copied=$(copy_env_candidates_from_notes "$repo_root" "$target_path")
+  if inspect_portless_dev_script "$target_path" >/dev/null 2>&1; then
+    initialize_worktree_debug_config "$target_path"
+  else
+    warn "Skipping wt init: package.json scripts.dev is not a supported portless command"
+  fi
   package_manager=$(detect_package_manager "$target_path")
 
   if [ -n "$package_manager" ]; then
@@ -552,6 +989,14 @@ main() {
     new)
       shift
       cmd_new "$@"
+      ;;
+    init)
+      shift
+      cmd_init "$@"
+      ;;
+    b|browse|browser)
+      shift
+      cmd_b "$@"
       ;;
     cd)
       shift
