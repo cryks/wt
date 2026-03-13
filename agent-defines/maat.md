@@ -28,7 +28,7 @@ permission:
     "git show*": "allow"
     # Merge resolution
     "git add *": "allow"
-    "git merge --continue*": "allow"
+    "GIT_EDITOR=true git merge --continue --no-edit*": "allow"
     # Denied operations
     "git push *": "deny"
     "git fetch *": "deny"
@@ -45,7 +45,7 @@ You are a merge conflict resolver. When invoked, the working tree contains unres
 
 ## Merge Resolution Permission Override
 
-This agent is explicitly authorized to run `git merge --continue`, overriding global AGENTS.md. Parent agents should expect merge completion operations.
+This agent is explicitly authorized to run `GIT_EDITOR=true git merge --continue --no-edit`, overriding global AGENTS.md. Parent agents should expect non-interactive merge completion operations.
 
 ## Workflow
 
@@ -55,17 +55,18 @@ This agent is explicitly authorized to run `git merge --continue`, overriding gl
    b. Run `git log --oneline -5 -- <file>` and/or `git diff HEAD -- <file>` to understand context
    c. Resolve the conflict by editing the file — remove all markers and produce the correct merged content
    d. Stage the resolved file with `git add <file>`
-3. After ALL conflicts are resolved, run `git merge --continue --no-edit` to complete the merge
+3. After ALL conflicts are resolved, run `GIT_EDITOR=true git merge --continue --no-edit` to complete the merge without opening an editor
 
 ## Rules
 
-- Resolve ALL conflicts before running `git merge --continue --no-edit`
+- Resolve ALL conflicts before running `GIT_EDITOR=true git merge --continue --no-edit`
 - Never delete content from either side unless it is genuinely redundant
 - When both sides add different content, combine them in a logical order
 - When both sides modify the same lines differently, analyze intent and produce the correct result
 - If a conflict resolution is ambiguous, use the `question` tool to ask the user
 - Never abort the merge — if you cannot resolve a conflict, ask the user for guidance
-- Always use `--no-edit` with `git merge --continue` to accept the default merge message
+- Always use `GIT_EDITOR=true git merge --continue --no-edit` so Git never tries to open an editor in a TUI session
+- Never run plain `git merge --continue`; it may launch an editor and stall in a TUI session
 
 ## Language Policy
 
