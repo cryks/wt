@@ -36,6 +36,7 @@ With the sourced wrapper:
 - `wt new <branch>` and `wt new` (interactive mode) also move you into the new worktree
 - `wt rm` with no target hops back to the primary worktree before removing the current linked worktree
 - `wt merge` moves you back to the primary worktree after a successful merge
+- `wt sync` keeps you in the current linked worktree after syncing from primary
 
 Here, "primary" means the repository-root checkout managed by `git worktree`, using whatever branch is currently checked out there.
 
@@ -110,6 +111,20 @@ The merge strategy is:
 2. Otherwise, merge the primary branch into the feature branch first (reverse merge) to keep the feature branch safe from conflicts, then fast-forward the primary branch.
 3. If the reverse merge produces conflicts, OpenCode (with the Maat agent) is launched to resolve them automatically. If AI resolution fails, the merge is aborted cleanly and the worktree is left intact.
 
+### `wt sync`
+
+Merge the branch currently checked out in the primary worktree into the current linked worktree, keeping the worktree and branch intact.
+
+```bash
+wt sync
+```
+
+The sync strategy is:
+
+1. If the current worktree branch can be fast-forwarded to the primary branch, do that directly.
+2. Otherwise, merge the primary branch into the current worktree branch.
+3. If that merge produces conflicts, OpenCode (with the Maat agent) is launched to resolve them automatically. If AI resolution fails, the merge is aborted cleanly and the worktree is left intact.
+
 ### `wt rm [--force] [branch-or-handle]`
 
 Remove a linked worktree conservatively.
@@ -152,6 +167,9 @@ wt b feature/test      # specific worktree
 - `wt merge` merges the primary branch into the feature branch first to keep it safe from conflicts
 - `wt merge` uses AI to resolve conflicts, and aborts cleanly if resolution fails
 - `wt merge` never pushes to a remote
+- `wt sync` refuses dirty worktrees and refuses to run when the primary branch has no commits ahead of the current linked branch
+- `wt sync` merges the primary branch into the current linked worktree and keeps that worktree in place
+- `wt sync` uses AI to resolve conflicts, and aborts cleanly if resolution fails
 - real `cd` behavior requires sourcing `shell/wt.bash`, because a subprocess cannot change the parent shell directory
 
 ## Package manager detection

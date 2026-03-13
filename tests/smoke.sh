@@ -1613,6 +1613,229 @@ EOF
   assert_file_exists "$repo/primary.txt" "the non-main primary branch should retain its own file after merge"
 }
 
+test_sync_fast_forward_keeps_current_worktree() {
+  local repo worktree output expected_worktree
+  repo=$(make_repo)
+  configure_repo_for_merge "$repo"
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  printf 'primary change\n' >"$repo/primary.txt"
+  commit_repo_state "$repo" "add primary change"
+
+  expected_worktree=$(cd "$worktree" && pwd -P)
+
+  output=$(PATH="/usr/bin:/bin:/usr/sbin:/sbin" bash <<EOF
+set -euo pipefail
+source "$ROOT/shell/wt.bash"
+cd "$worktree"
+wt sync
+printf 'cwd=%s\n' "\$(pwd -P)"
+EOF
+)
+
+  assert_contains "$output" "sync: fast-forward" "wt sync should fast-forward when the current branch has no unique commits"
+  assert_contains "$output" "cwd=$expected_worktree" "wt sync should keep the shell in the current worktree"
+  assert_file_exists "$worktree/primary.txt" "wt sync should bring primary changes into the current worktree"
+  assert_file_exists "$worktree" "wt sync should keep the worktree intact"
+  if ! git -C "$repo" show-ref --verify --quiet refs/heads/feature/test; then
+    fail "wt sync should keep the current branch after syncing"
+  fi
+}
+
+test_sync_non_ff_clean() {
+  local repo worktree output
+  repo=$(make_repo)
+  configure_repo_for_merge "$repo"
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  printf 'feature\n' >"$worktree/feature.txt"
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false add feature.txt >/dev/null
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false commit -m "add feature" >/dev/null
+
+  printf 'primary change\n' >"$repo/primary.txt"
+  commit_repo_state "$repo" "add primary change"
+
+  output=$(cd "$worktree" && bash "$ROOT/bin/wt" sync)
+
+  assert_contains "$output" "sync: resolved without conflicts" "wt sync should report a clean merge when both branches moved"
+  assert_file_exists "$worktree/feature.txt" "wt sync should retain the current branch changes"
+  assert_file_exists "$worktree/primary.txt" "wt sync should merge in the primary branch changes"
+  assert_file_exists "$worktree" "wt sync should keep the worktree directory"
+}
+
+test_sync_refuses_dirty_worktree() {
+  local repo worktree output
+  repo=$(make_repo)
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+  touch "$worktree/dirty.txt"
+
+  if output=$(cd "$worktree" && bash "$ROOT/bin/wt" sync 2>&1); then
+    fail "wt sync should refuse a dirty worktree"
+  fi
+
+  assert_contains "$output" "Cannot sync: worktree has uncommitted changes" "wt sync should explain the dirty refusal"
+}
+
+test_sync_refuses_no_commits_ahead() {
+  local repo worktree output primary_branch
+  repo=$(make_repo)
+  primary_branch=$(repo_primary_branch "$repo")
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  if output=$(cd "$worktree" && bash "$ROOT/bin/wt" sync 2>&1); then
+    fail "wt sync should refuse when the primary branch has no commits ahead"
+  fi
+
+  assert_contains "$output" "Cannot sync: no commits ahead on $primary_branch" "wt sync should explain the no-op refusal"
+}
+
+test_sync_refuses_primary_worktree() {
+  local repo output
+  repo=$(make_repo)
+
+  if output=$(cd "$repo" && bash "$ROOT/bin/wt" sync 2>&1); then
+    fail "wt sync should refuse on the primary worktree"
+  fi
+
+  assert_contains "$output" "Cannot sync: already on the primary worktree" "wt sync should explain the primary-worktree refusal"
+}
+
+test_sync_uses_current_primary_branch_when_primary_switches() {
+  local repo worktree output primary_branch
+  repo=$(make_repo trunk)
+  configure_repo_for_merge "$repo"
+  git -C "$repo" switch -c release/1.0 >/dev/null
+  primary_branch=$(repo_primary_branch "$repo")
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  printf 'feature\n' >"$worktree/feature.txt"
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false add feature.txt >/dev/null
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false commit -m "add feature" >/dev/null
+
+  printf 'release change\n' >"$repo/release.txt"
+  commit_repo_state "$repo" "add release change"
+
+  output=$(cd "$worktree" && bash "$ROOT/bin/wt" sync)
+
+  assert_eq "release/1.0" "$primary_branch" "test setup should switch the primary worktree to a different branch"
+  assert_contains "$output" "sync: resolved without conflicts" "wt sync should merge from the currently checked out primary branch"
+  assert_file_exists "$worktree/release.txt" "wt sync should bring in commits from the switched primary branch"
+  assert_file_exists "$worktree/feature.txt" "wt sync should retain current branch changes when primary is switched"
+}
+
+test_sync_refuses_when_primary_worktree_is_detached_head() {
+  local repo worktree output
+  repo=$(make_repo)
+  configure_repo_for_merge "$repo"
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  printf 'feature\n' >"$worktree/feature.txt"
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false add feature.txt >/dev/null
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false commit -m "add feature" >/dev/null
+
+  git -C "$repo" checkout --detach >/dev/null 2>&1
+
+  if output=$(cd "$worktree" && bash "$ROOT/bin/wt" sync 2>&1); then
+    fail "wt sync should refuse when the primary worktree is detached"
+  fi
+
+  assert_contains "$output" "Unable to determine the primary branch" "wt sync should explain why detached primary HEAD is unsupported"
+}
+
+test_sync_with_conflicts_ai_resolves() {
+  local repo worktree fake_bin output
+  repo=$(make_repo)
+  configure_repo_for_merge "$repo"
+
+  printf 'original\n' >"$repo/shared.txt"
+  commit_repo_state "$repo" "add shared file"
+
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  printf 'feature change\n' >"$worktree/shared.txt"
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false add shared.txt >/dev/null
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false commit -m "feature change to shared" >/dev/null
+
+  printf 'primary change\n' >"$repo/shared.txt"
+  commit_repo_state "$repo" "primary change to shared"
+
+  fake_bin=$(make_fake_opencode_merge_bin)
+
+  output=$(cd "$worktree" && PATH="$fake_bin:$PATH" bash "$ROOT/bin/wt" sync 2>&1)
+
+  assert_contains "$output" "sync: conflicts detected" "wt sync should detect conflicts"
+  assert_contains "$output" "sync: conflicts resolved by AI" "wt sync should report AI resolution"
+  assert_file_exists "$worktree/shared.txt" "wt sync should keep the worktree after resolving conflicts"
+}
+
+test_sync_with_conflicts_ai_fails() {
+  local repo worktree fake_bin output
+  repo=$(make_repo)
+  configure_repo_for_merge "$repo"
+
+  printf 'original\n' >"$repo/shared.txt"
+  commit_repo_state "$repo" "add shared file"
+
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  printf 'feature change\n' >"$worktree/shared.txt"
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false add shared.txt >/dev/null
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false commit -m "feature change to shared" >/dev/null
+
+  printf 'primary change\n' >"$repo/shared.txt"
+  commit_repo_state "$repo" "primary change to shared"
+
+  fake_bin=$(make_fake_opencode_noop_bin)
+
+  if output=$(cd "$worktree" && PATH="$fake_bin:$PATH" bash "$ROOT/bin/wt" sync 2>&1); then
+    fail "wt sync should fail when AI cannot resolve conflicts"
+  fi
+
+  assert_contains "$output" "sync: conflicts detected" "wt sync should detect conflicts"
+  assert_contains "$output" "Sync aborted: conflicts were not fully resolved" "wt sync should report abort"
+  assert_file_exists "$worktree" "wt sync should keep the worktree when AI fails"
+
+  local worktree_state
+  worktree_state=$(repo_dirty_state "$worktree")
+  assert_eq "clean" "$worktree_state" "wt sync should abort the merge cleanly when AI fails"
+}
+
+test_sync_with_conflicts_missing_opencode_aborts_cleanly() {
+  local repo worktree output worktree_state
+  repo=$(make_repo)
+  configure_repo_for_merge "$repo"
+
+  printf 'original\n' >"$repo/shared.txt"
+  commit_repo_state "$repo" "add shared file"
+
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  printf 'feature change\n' >"$worktree/shared.txt"
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false add shared.txt >/dev/null
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false commit -m "feature change to shared" >/dev/null
+
+  printf 'primary change\n' >"$repo/shared.txt"
+  commit_repo_state "$repo" "primary change to shared"
+
+  if output=$(cd "$worktree" && PATH="/usr/bin:/bin:/usr/sbin:/sbin" bash "$ROOT/bin/wt" sync 2>&1); then
+    fail "wt sync should fail when opencode is unavailable during conflict resolution"
+  fi
+
+  assert_contains "$output" "sync: conflicts detected" "wt sync should detect conflicts before requiring opencode"
+  assert_contains "$output" "Sync aborted: missing required command: opencode" "wt sync should explain the missing opencode abort"
+  worktree_state=$(repo_dirty_state "$worktree")
+  assert_eq "clean" "$worktree_state" "wt sync should abort cleanly when opencode is unavailable"
+}
+
 test_new_runs_init_for_portless_worktree() {
   local repo fake_bin
   repo=$(make_repo)
@@ -1674,5 +1897,15 @@ test_merge_refuses_when_primary_worktree_is_detached_head
 test_merge_with_conflicts_ai_resolves
 test_merge_with_conflicts_ai_fails
 test_merge_non_ff_clean_with_non_main_primary_branch
+test_sync_fast_forward_keeps_current_worktree
+test_sync_non_ff_clean
+test_sync_refuses_dirty_worktree
+test_sync_refuses_no_commits_ahead
+test_sync_refuses_primary_worktree
+test_sync_uses_current_primary_branch_when_primary_switches
+test_sync_refuses_when_primary_worktree_is_detached_head
+test_sync_with_conflicts_ai_resolves
+test_sync_with_conflicts_ai_fails
+test_sync_with_conflicts_missing_opencode_aborts_cleanly
 
 printf 'smoke tests passed\n'

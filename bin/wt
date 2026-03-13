@@ -34,6 +34,7 @@ Usage:
   wt b [branch-or-handle]
   wt cd <branch-or-handle>
   wt open <branch-or-handle>
+  wt sync
   wt merge
   wt rm [--force] [branch-or-handle]
   wt ls
@@ -45,6 +46,7 @@ Commands:
   b      Open the current or requested worktree in the debug browser
   cd     Print the absolute path for a linked worktree
   open   Print the absolute path for a linked worktree
+  sync   Merge the primary branch into the current linked worktree
   merge  Merge the current linked worktree into the primary branch and clean up
   rm     Remove a linked worktree conservatively
   ls     List the primary checkout and linked worktrees
@@ -1332,35 +1334,61 @@ merge_head_exists() {
   [ -f "$git_dir/MERGE_HEAD" ]
 }
 
-merge_feature_with_primary() {
-  local feature_root feature_branch primary_branch
-  feature_root=$1
-  feature_branch=$2
-  primary_branch=$3
+merge_branch_into_current() {
+  local target_root current_branch incoming_branch action_label action_title merge_output
+  target_root=$1
+  current_branch=$2
+  incoming_branch=$3
+  action_label=$4
+  action_title=$5
 
-  if git -C "$feature_root" merge "$primary_branch" >/dev/null 2>&1; then
-    note "merge: resolved without conflicts"
+  if merge_output=$(git -C "$target_root" merge "$incoming_branch" 2>&1); then
+    note "$action_label: resolved without conflicts"
     return 0
   fi
 
-  if ! merge_head_exists "$feature_root"; then
-    die "Merge failed for an unexpected reason"
+  if ! merge_head_exists "$target_root"; then
+    [ -n "$merge_output" ] || merge_output="$action_title failed for an unexpected reason"
+    die "$merge_output"
   fi
 
-  note "merge: conflicts detected, launching AI resolver"
-  require_command opencode
+  note "$action_label: conflicts detected, launching AI resolver"
+  if ! command -v opencode >/dev/null 2>&1; then
+    warn "$action_label: opencode is required for AI conflict resolution, aborting"
+    git -C "$target_root" merge --abort >/dev/null 2>&1 || true
+    die "$action_title aborted: missing required command: opencode"
+  fi
 
-  opencode "$feature_root" --agent "Maat" --model "$WT_MERGE_MODEL" \
-    --prompt "Merge conflicts need to be resolved. Branch '$feature_branch' is merging '$primary_branch'. Examine the conflicts, resolve them, stage the files, and run 'git merge --continue --no-edit'." \
+  opencode "$target_root" --agent "Maat" --model "$WT_MERGE_MODEL" \
+    --prompt "Merge conflicts need to be resolved. Branch '$current_branch' is merging '$incoming_branch'. Examine the conflicts, resolve them, stage the files, and run 'git merge --continue --no-edit'." \
     || true
 
-  if merge_head_exists "$feature_root"; then
-    warn "merge: conflicts not fully resolved, aborting"
-    git -C "$feature_root" merge --abort >/dev/null 2>&1 || true
-    die "Merge aborted: conflicts were not fully resolved"
+  if merge_head_exists "$target_root"; then
+    warn "$action_label: conflicts not fully resolved, aborting"
+    git -C "$target_root" merge --abort >/dev/null 2>&1 || true
+    die "$action_title aborted: conflicts were not fully resolved"
   fi
 
-  note "merge: conflicts resolved by AI"
+  note "$action_label: conflicts resolved by AI"
+}
+
+resolve_current_worktree_index() {
+  local repo_root i index
+  repo_root=$(get_repo_root)
+
+  list_worktrees
+  index=""
+  i=0
+  while [ $i -lt $WT_COUNT ]; do
+    if [ "${WT_PATHS[$i]}" = "$repo_root" ]; then
+      index=$i
+      break
+    fi
+    i=$((i + 1))
+  done
+
+  [ -n "$index" ] || die "Unable to resolve the current worktree"
+  WT_TARGET_INDEX=$index
 }
 
 merge_cleanup() {
@@ -1381,26 +1409,15 @@ merge_cleanup() {
 }
 
 cmd_merge() {
-  local repo_root main_root primary_branch feature_root feature_branch unique_commits i index
+  local main_root primary_branch feature_root feature_branch unique_commits index
 
   [ $# -eq 0 ] || die "Usage: wt merge"
   require_git_repo
 
-  repo_root=$(get_repo_root)
   main_root=$(get_main_repo_root)
   primary_branch=$(get_primary_branch "$main_root")
-
-  list_worktrees
-  index=""
-  i=0
-  while [ $i -lt $WT_COUNT ]; do
-    if [ "${WT_PATHS[$i]}" = "$repo_root" ]; then
-      index=$i
-      break
-    fi
-    i=$((i + 1))
-  done
-  [ -n "$index" ] || die "Unable to resolve the current worktree"
+  resolve_current_worktree_index
+  index=$WT_TARGET_INDEX
 
   feature_root="${WT_PATHS[$index]}"
   feature_branch="${WT_BRANCHES[$index]}"
@@ -1415,7 +1432,7 @@ cmd_merge() {
   if git -C "$main_root" merge --ff-only "$feature_branch" >/dev/null 2>&1; then
     note "merge: fast-forward"
   else
-    merge_feature_with_primary "$feature_root" "$feature_branch" "$primary_branch"
+    merge_branch_into_current "$feature_root" "$feature_branch" "$primary_branch" "merge" "Merge"
 
     git -C "$main_root" merge --ff-only "$feature_branch" >/dev/null 2>&1 \
       || die "Unexpected: fast-forward failed after reverse merge"
@@ -1423,6 +1440,35 @@ cmd_merge() {
   fi
 
   merge_cleanup "$main_root" "$feature_root" "$feature_branch"
+}
+
+cmd_sync() {
+  local main_root primary_branch feature_root feature_branch incoming_commits index
+
+  [ $# -eq 0 ] || die "Usage: wt sync"
+  require_git_repo
+
+  main_root=$(get_main_repo_root)
+  primary_branch=$(get_primary_branch "$main_root")
+  resolve_current_worktree_index
+  index=$WT_TARGET_INDEX
+
+  feature_root="${WT_PATHS[$index]}"
+  feature_branch="${WT_BRANCHES[$index]}"
+
+  [ "${WT_TYPES[$index]}" != "primary" ] || die "Cannot sync: already on the primary worktree"
+  [ "$feature_branch" != "HEAD" ] || die "Cannot sync: current worktree has a detached HEAD"
+  [ "$(git_dirty_state "$feature_root")" = "clean" ] || die "Cannot sync: worktree has uncommitted changes"
+
+  incoming_commits=$(git -C "$feature_root" log "$feature_branch..$primary_branch" --oneline 2>/dev/null || true)
+  [ -n "$incoming_commits" ] || die "Cannot sync: no commits ahead on $primary_branch"
+
+  if git -C "$feature_root" merge --ff-only "$primary_branch" >/dev/null 2>&1; then
+    note "sync: fast-forward"
+    return 0
+  fi
+
+  merge_branch_into_current "$feature_root" "$feature_branch" "$primary_branch" "sync" "Sync"
 }
 
 main() {
@@ -1455,6 +1501,10 @@ main() {
     merge)
       shift
       cmd_merge "$@"
+      ;;
+    sync)
+      shift
+      cmd_sync "$@"
       ;;
     rm)
       shift

@@ -16,7 +16,7 @@ There is no build step, no transpilation, and no package.json for this repositor
 
 ### Why a single Bash file
 
-All commands live in `bin/wt` as functions (`cmd_new`, `cmd_rm`, `cmd_merge`, etc.). This is intentional: `wt` is distributed by adding `bin/` to `PATH`, so a single self-contained script avoids library resolution issues. Helper functions like `normalize_handle`, `detect_package_manager`, and `list_worktrees` are defined before the command functions that use them.
+All commands live in `bin/wt` as functions (`cmd_new`, `cmd_rm`, `cmd_merge`, `cmd_sync`, etc.). This is intentional: `wt` is distributed by adding `bin/` to `PATH`, so a single self-contained script avoids library resolution issues. Helper functions like `normalize_handle`, `detect_package_manager`, and `list_worktrees` are defined before the command functions that use them.
 
 ### Embedded Python helpers
 
@@ -34,10 +34,10 @@ A "handle" is the filesystem-safe name derived from a branch name by `normalize_
 
 `wt` does NOT hardcode `main` or `master`. The "primary branch" is whatever branch is currently checked out in the primary (main repo root) worktree, determined by `get_primary_branch` via `git branch --show-current`. This means:
 
-- If you switch the primary worktree to `release/1.0`, that becomes the merge target for `wt merge`.
-- A detached HEAD in the primary worktree makes `wt merge` refuse to operate.
+- If you switch the primary worktree to `release/1.0`, that becomes the merge target for both `wt merge` and `wt sync`.
+- A detached HEAD in the primary worktree makes both `wt merge` and `wt sync` refuse to operate.
 
-### Merge strategy
+### Merge and sync strategy
 
 `wt merge` uses a two-step approach to keep the feature branch safe:
 
@@ -46,19 +46,21 @@ A "handle" is the filesystem-safe name derived from a branch name by `normalize_
 
 This design ensures the primary branch never has a dirty merge commit — the feature branch absorbs any conflict resolution. AI conflict resolution (OpenCode with the Maat agent) only runs during the reverse merge step. If AI fails, `git merge --abort` restores the feature branch to its pre-merge state.
 
+`wt sync` reuses the same branch-integration path in the opposite user flow: it merges the primary branch into the current linked worktree, but does not remove the worktree or delete the branch afterward. `cmd_sync` first tries `git merge --ff-only <primary-branch>` in the current worktree, then falls back to the shared `merge_branch_into_current` helper for non-fast-forward merges and AI conflict resolution.
+
 ### OpenCode integration points
 
 There are three distinct OpenCode integration points, each using a different model and protocol:
 
 1. **Branch name suggestion** (`suggest_branch_name_with_opencode`): Uses `opencode run --format json` with `WT_BRANCH_NAME_MODEL` (default: `opencode-go/kimi-k2.5`). Parses newline-delimited JSON events, extracting `type: "text"` parts. The prompt constrains the output to a single valid `git check-ref-format` branch name. The `run` subcommand accepts `--dir` to set the working directory.
 
-2. **Merge conflict resolution** (`merge_feature_with_primary`): Uses `opencode <project-path> --agent "Maat" --model "$WT_MERGE_MODEL"`. This is an interactive agent session, not `run` mode. The project path is passed as a positional argument (not `--dir`, which is only valid for the `run` and `attach` subcommands). The agent is instructed to examine conflicts, resolve them, stage files, and run `git merge --continue`.
+2. **Merge conflict resolution** (`merge_branch_into_current`): Uses `opencode <project-path> --agent "Maat" --model "$WT_MERGE_MODEL"`. This is an interactive agent session, not `run` mode. The project path is passed as a positional argument (not `--dir`, which is only valid for the `run` and `attach` subcommands). The agent is instructed to examine conflicts, resolve them, stage files, and run `git merge --continue`. Both `wt merge` and `wt sync` reuse this helper.
 
 3. **New worktree autostart** (`launch_opencode_in_worktree`): Uses `opencode <project-path> --agent "$WT_NEW_WORKTREE_AGENT" --prompt "$goal"`. The project path is the first positional argument. Launches an interactive OpenCode session in the new worktree with the user's original goal description, attached to the terminal's stdin/stdout.
 
 ### Shell wrapper design (`shell/wt.bash`)
 
-The wrapper defines a `wt` shell function that intercepts `cd`, `new`, `rm`, and `merge` subcommands and adds shell-level behavior (actually changing the working directory). Other commands pass through to `bin/wt` unchanged.
+The wrapper defines a `wt` shell function that intercepts `cd`, `new`, `rm`, and `merge` subcommands and adds shell-level behavior (actually changing the working directory). Other commands, including `sync`, pass through to `bin/wt` unchanged.
 
 Key subtlety: `wt rm` without arguments must `cd` back to the primary worktree BEFORE calling `bin/wt rm`, because you cannot remove a worktree while standing inside it. The wrapper detects this situation, resolves the primary worktree path, `cd`s there, then delegates removal. For dirty worktrees, the wrapper intentionally does NOT `cd` away first — it lets `bin/wt rm` fail with the expected error while keeping the user in their current directory.
 
