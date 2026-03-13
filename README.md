@@ -27,6 +27,7 @@ source "/Users/rbr/work/wt/shell/wt.bash"
 
 After sourcing that file, `wt cd <name>` changes into the linked worktree in your current shell,
 and `wt new <branch>` also moves you into the newly created worktree when it succeeds.
+With the sourced wrapper, `wt rm` with no target hops back to `main` before removing the current linked worktree.
 The wrapper resolves the bundled `bin/wt` directly, so it does not depend on `command wt` lookup.
 The `wt --help` output still describes the binary itself, while the sourced wrapper adds shell-level `cd` behavior.
 
@@ -59,7 +60,9 @@ wt ls
 Remove a linked worktree conservatively:
 
 ```bash
+wt rm
 wt rm feature/test
+wt rm --force
 wt rm --force feature/test
 ```
 
@@ -68,9 +71,10 @@ wt rm --force feature/test
 `wt` refuses or avoids a few behaviors on purpose:
 - it must be run from inside the repository you want to manage
 - it will not delete the main worktree
-- it will not delete branches in v1
 - it refuses locked worktrees in v1
 - it refuses dirty worktrees unless you pass `--force`
+- when a removed linked worktree is clean, it also tries `git branch -d`
+- with `wt rm --force`, it also uses `git branch -D`
 - it does not symlink `node_modules` or share generated framework directories
 - real `cd` behavior requires sourcing `shell/wt.bash`, because a subprocess cannot change the parent shell directory
 

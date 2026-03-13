@@ -40,6 +40,20 @@ assert_not_contains() {
   esac
 }
 
+assert_file_exists() {
+  local path message
+  path=$1
+  message=$2
+  [ -e "$path" ] || fail "$message\nmissing path: $path"
+}
+
+assert_file_missing() {
+  local path message
+  path=$1
+  message=$2
+  [ ! -e "$path" ] || fail "$message\npath still exists: $path"
+}
+
 make_repo() {
   local base repo
   base=$(mktemp -d)
@@ -391,6 +405,152 @@ test_cd_missing_target_fails() {
   fi
 }
 
+test_wrapper_rm_without_args_removes_current_worktree_and_branch() {
+  local repo worktree output expected_repo
+  repo=$(make_repo)
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+  expected_repo=$(cd "$repo" && pwd -P)
+
+  output=$(PATH="/usr/bin:/bin:/usr/sbin:/sbin" bash <<EOF
+set -euo pipefail
+source "$ROOT/shell/wt.bash"
+cd "$worktree"
+wt rm >/dev/null
+printf 'cwd=%s\n' "\$(pwd -P)"
+if git -C "$repo" show-ref --verify --quiet refs/heads/feature/test; then
+  printf 'branch=yes\n'
+else
+  printf 'branch=no\n'
+fi
+EOF
+)
+
+  assert_contains "$output" "cwd=$expected_repo" "wrapper wt rm without args should move back to the main worktree"
+  assert_contains "$output" "branch=no" "wrapper wt rm without args should delete the clean branch"
+  assert_file_missing "$worktree" "wrapper wt rm without args should remove the current worktree"
+}
+
+test_wrapper_rm_without_args_refuses_on_main() {
+  local repo output main_out main_err expected_repo
+  repo=$(make_repo)
+  expected_repo=$(cd "$repo" && pwd -P)
+  main_out=$(mktemp)
+  main_err=$(mktemp)
+
+  output=$(PATH="/usr/bin:/bin:/usr/sbin:/sbin" bash <<EOF
+set -euo pipefail
+source "$ROOT/shell/wt.bash"
+cd "$repo"
+if wt rm >"$main_out" 2>"$main_err"; then
+  printf 'status=success\n'
+else
+  printf 'status=failure\n'
+fi
+printf 'cwd=%s\n' "\$(pwd -P)"
+cat "$main_err"
+EOF
+)
+
+  rm -f "$main_out" "$main_err"
+
+  assert_contains "$output" "status=failure" "wt rm without args should fail on the main worktree"
+  assert_contains "$output" "cwd=$expected_repo" "failed wt rm on main should keep the shell in place"
+  assert_contains "$output" "Refusing to remove the main worktree" "wt rm without args should explain the main-worktree refusal"
+}
+
+test_wrapper_rm_without_args_dirty_keeps_current_directory() {
+  local repo worktree output dirty_out dirty_err expected_worktree
+  repo=$(make_repo)
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+  touch "$worktree/dirty.txt"
+  expected_worktree=$(cd "$worktree" && pwd -P)
+  dirty_out=$(mktemp)
+  dirty_err=$(mktemp)
+
+  output=$(PATH="/usr/bin:/bin:/usr/sbin:/sbin" bash <<EOF
+set -euo pipefail
+source "$ROOT/shell/wt.bash"
+cd "$worktree"
+if wt rm >"$dirty_out" 2>"$dirty_err"; then
+  printf 'status=success\n'
+else
+  printf 'status=failure\n'
+fi
+printf 'cwd=%s\n' "\$(pwd -P)"
+cat "$dirty_err"
+EOF
+)
+
+  rm -f "$dirty_out" "$dirty_err"
+
+  assert_contains "$output" "status=failure" "dirty wt rm without args should fail"
+  assert_contains "$output" "cwd=$expected_worktree" "dirty wt rm without args should not switch away before failing"
+  assert_contains "$output" "Refusing to remove a dirty worktree without --force" "dirty wt rm without args should explain the refusal"
+  assert_file_exists "$worktree" "dirty wt rm without args should keep the worktree"
+}
+
+test_wrapper_rm_force_without_args_removes_dirty_current_worktree_and_branch() {
+  local repo worktree output expected_repo
+  repo=$(make_repo)
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+  touch "$worktree/dirty.txt"
+  expected_repo=$(cd "$repo" && pwd -P)
+
+  output=$(PATH="/usr/bin:/bin:/usr/sbin:/sbin" bash <<EOF
+set -euo pipefail
+source "$ROOT/shell/wt.bash"
+cd "$worktree"
+wt rm --force >/dev/null
+printf 'cwd=%s\n' "\$(pwd -P)"
+if git -C "$repo" show-ref --verify --quiet refs/heads/feature/test; then
+  printf 'branch=yes\n'
+else
+  printf 'branch=no\n'
+fi
+EOF
+)
+
+  assert_contains "$output" "cwd=$expected_repo" "wrapper wt rm --force without args should move back to the main worktree"
+  assert_contains "$output" "branch=no" "wrapper wt rm --force without args should force delete the branch"
+  assert_file_missing "$worktree" "wrapper wt rm --force without args should remove the dirty worktree"
+}
+
+test_rm_explicit_target_deletes_clean_branch() {
+  local repo worktree
+  repo=$(make_repo)
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  (cd "$repo" && bash "$ROOT/bin/wt" rm feature/test >/dev/null)
+
+  assert_file_missing "$worktree" "wt rm with an explicit clean target should remove the worktree"
+  if git -C "$repo" show-ref --verify --quiet refs/heads/feature/test; then
+    fail "wt rm with an explicit clean target should delete the branch"
+  fi
+}
+
+test_rm_explicit_target_leaves_unmerged_branch_when_branch_delete_fails() {
+  local repo worktree output
+  repo=$(make_repo)
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+  printf 'feature\n' >"$worktree/feature.txt"
+  commit_repo_state "$worktree" "feature commit"
+
+  if output=$(cd "$repo" && bash "$ROOT/bin/wt" rm feature/test 2>&1 >/dev/null); then
+    fail "wt rm should fail when branch deletion with -d fails"
+  fi
+
+  assert_file_missing "$worktree" "wt rm should still remove the worktree before branch deletion fails"
+  if ! git -C "$repo" show-ref --verify --quiet refs/heads/feature/test; then
+    fail "wt rm should retain the unmerged branch when git branch -d fails"
+  fi
+  assert_contains "$output" "Removed worktree but failed to delete branch with git branch -d: feature/test" "wt rm should explain partial branch deletion failure"
+}
+
 test_ls_shows_branch_first() {
   local repo output header
   repo=$(make_repo)
@@ -591,6 +751,12 @@ test_wrapper_cd_missing_target_keeps_shell_alive
 test_zsh_wrapper_cd_changes_directory
 test_zsh_wrapper_new_changes_directory
 test_cd_missing_target_fails
+test_wrapper_rm_without_args_removes_current_worktree_and_branch
+test_wrapper_rm_without_args_refuses_on_main
+test_wrapper_rm_without_args_dirty_keeps_current_directory
+test_wrapper_rm_force_without_args_removes_dirty_current_worktree_and_branch
+test_rm_explicit_target_deletes_clean_branch
+test_rm_explicit_target_leaves_unmerged_branch_when_branch_delete_fails
 test_ls_shows_branch_first
 test_init_creates_launch_json_for_explicit_portless_name
 test_init_preserves_unrelated_configs_and_removes_browser_launch

@@ -28,7 +28,7 @@ Usage:
   wt b [branch-or-handle]
   wt cd <branch-or-handle>
   wt open <branch-or-handle>
-  wt rm [--force] <branch-or-handle>
+  wt rm [--force] [branch-or-handle]
   wt ls
   wt help
 
@@ -44,7 +44,7 @@ Commands:
 Notes:
   - Run wt from inside the repository you want to manage.
   - wt never starts a dev server.
-  - wt never deletes branches in v1.
+  - wt deletes linked branches when removal is safe.
 EOF
 }
 
@@ -1018,7 +1018,7 @@ cmd_new() {
 }
 
 cmd_rm() {
-  local force target index repo_root target_path target_state target_type cmd
+  local force target index repo_root main_repo_root target_path target_state target_type target_branch cmd branch_cmd i
   force=0
   target=""
 
@@ -1028,12 +1028,12 @@ cmd_rm() {
         force=1
         ;;
       --help|-h)
-        printf '%s\n' "Usage: wt rm [--force] <branch-or-handle>"
+        printf '%s\n' "Usage: wt rm [--force] [branch-or-handle]"
         return 0
         ;;
       *)
         if [ -n "$target" ]; then
-          die "Usage: wt rm [--force] <branch-or-handle>"
+          die "Usage: wt rm [--force] [branch-or-handle]"
         fi
         target=$1
         ;;
@@ -1041,18 +1041,36 @@ cmd_rm() {
     shift
   done
 
-  [ -n "$target" ] || die "Usage: wt rm [--force] <branch-or-handle>"
   require_git_repo
   repo_root=$(get_repo_root)
-  resolve_worktree_target "$target"
-  index=$WT_TARGET_INDEX
+  main_repo_root=$(get_main_repo_root)
+
+  if [ -n "$target" ]; then
+    resolve_worktree_target "$target"
+    index=$WT_TARGET_INDEX
+  else
+    list_worktrees
+    index=""
+    i=0
+    while [ $i -lt $WT_COUNT ]; do
+      if [ "${WT_PATHS[$i]}" = "$repo_root" ]; then
+        index=$i
+        break
+      fi
+      i=$((i + 1))
+    done
+    [ -n "$index" ] || die "Unable to resolve the current worktree"
+  fi
 
   target_path=${WT_PATHS[$index]}
   target_state=${WT_STATES[$index]}
   target_type=${WT_TYPES[$index]}
+  target_branch=${WT_BRANCHES[$index]}
 
   [ "$target_type" != "main" ] || die "Refusing to remove the main worktree"
-  current_working_tree_is_inside "$target_path" && die "Refusing to remove a worktree from inside that worktree: $target_path"
+  if [ -n "$target" ]; then
+    current_working_tree_is_inside "$target_path" && die "Refusing to remove a worktree from inside that worktree: $target_path"
+  fi
   case ",$target_state," in
     *,locked,*) die "Refusing to remove a locked worktree in v1: $target_path" ;;
   esac
@@ -1064,7 +1082,7 @@ cmd_rm() {
       ;;
   esac
 
-  cmd=(git -C "$repo_root" worktree remove)
+  cmd=(git -C "$main_repo_root" worktree remove)
   if [ $force -eq 1 ]; then
     cmd+=(--force)
   fi
@@ -1072,7 +1090,30 @@ cmd_rm() {
   "${cmd[@]}"
 
   note "removed_worktree: $target_path"
-  note "branch_retained: ${WT_BRANCHES[$index]}"
+
+  if [ "$target_branch" = "HEAD" ]; then
+    note "branch_retained: $target_branch"
+    return 0
+  fi
+
+  branch_cmd=(git -C "$main_repo_root" branch)
+  if [ $force -eq 1 ]; then
+    branch_cmd+=(-D)
+  else
+    branch_cmd+=(-d)
+  fi
+  branch_cmd+=("$target_branch")
+
+  if "${branch_cmd[@]}"; then
+    note "removed_branch: $target_branch"
+    return 0
+  fi
+
+  warn "branch_retained: $target_branch"
+  if [ $force -eq 1 ]; then
+    die "Removed worktree but failed to delete branch with git branch -D: $target_branch"
+  fi
+  die "Removed worktree but failed to delete branch with git branch -d: $target_branch"
 }
 
 main() {
