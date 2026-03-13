@@ -978,8 +978,7 @@ prompt_for_new_worktree_goal() {
   local goal
 
   while :; do
-    printf 'What do you want to do in this worktree? ' >&2
-    IFS= read -e -r goal || die "Cancelled wt new"
+    IFS= read -e -r -p 'What do you want to do in this worktree? ' goal || die "Cancelled wt new"
     if [ -n "$goal" ]; then
       printf '%s\n' "$goal"
       return 0
@@ -1085,8 +1084,7 @@ confirm_branch_name() {
   branch=$1
 
   while :; do
-    printf 'Branch name [%s]: ' "$branch" >&2
-    IFS= read -e -r response || die "Cancelled wt new"
+    IFS= read -e -r -p "Branch name [$branch]: " response || die "Cancelled wt new"
     if [ -n "$response" ]; then
       branch=$response
     fi
