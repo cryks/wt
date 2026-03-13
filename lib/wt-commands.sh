@@ -212,7 +212,7 @@ merge_branch_into_current() {
   fi
 
   opencode "$target_root" --agent "Maat" --model "$WT_MERGE_MODEL" \
-    --prompt "Merge conflicts need to be resolved. Branch '$current_branch' is merging '$incoming_branch'. Examine the conflicts, resolve them, stage the files, and run 'GIT_EDITOR=true git merge --continue --no-edit'." \
+    --prompt "Merge conflicts need to be resolved. Branch '$current_branch' is merging '$incoming_branch'. Examine the conflicts, resolve them, stage the files, and run 'GIT_EDITOR=true git merge --continue'." \
     || true
 
   if merge_head_exists "$target_root"; then
