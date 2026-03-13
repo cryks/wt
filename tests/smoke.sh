@@ -261,6 +261,69 @@ sys.exit(proc.wait())
 PY
 }
 
+render_terminal_output() {
+  python3 - "$1" <<'PY'
+import sys
+
+text = sys.argv[1]
+lines = [[]]
+row = 0
+col = 0
+i = 0
+
+def ensure_row(target: int) -> None:
+    while len(lines) <= target:
+        lines.append([])
+
+def clear_to_end() -> None:
+    line = lines[row]
+    del line[col:]
+
+while i < len(text):
+    ch = text[i]
+
+    if ch == "\x1b" and i + 2 < len(text) and text[i + 1] == "[":
+        cmd = text[i + 2]
+        if cmd == "K":
+            clear_to_end()
+            i += 3
+            continue
+
+    if ch == "\r":
+        col = 0
+        i += 1
+        continue
+
+    if ch == "\n":
+        row += 1
+        ensure_row(row)
+        col = 0
+        i += 1
+        continue
+
+    if ch == "\b":
+        if col > 0:
+            col -= 1
+        i += 1
+        continue
+
+    if ch == "\a":
+        i += 1
+        continue
+
+    ensure_row(row)
+    line = lines[row]
+    if col == len(line):
+        line.append(ch)
+    else:
+        line[col] = ch
+    col += 1
+    i += 1
+
+print("\n".join("".join(line).rstrip() for line in lines))
+PY
+}
+
 make_fake_opencode_merge_bin() {
   local dir
   dir=$(mktemp -d)
@@ -605,6 +668,26 @@ test_new_without_args_handles_multibyte_backspace_in_goal_prompt() {
   assert_contains "$output" "branch: feat/generated-branch" "wt new should keep using the suggested branch after multibyte backspace in the goal prompt"
 }
 
+test_new_without_args_keeps_goal_prompt_visible_after_excess_backspace() {
+  local repo fake_bin opencode_log output rendered_output
+  repo=$(make_repo)
+  fake_bin=$(make_fake_opencode_bin)
+  opencode_log=$(mktemp)
+
+  output=$(
+    cd "$repo" && \
+      PATH="$fake_bin:$PATH" \
+      WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
+      WT_TEST_OPENCODE_LOG="$opencode_log" \
+      run_in_pty $'abc\177\177\177\177\177add a guided onboarding flow\n\n' bash "$ROOT/bin/wt" new
+  )
+  rendered_output=$(render_terminal_output "$output")
+
+  assert_file_exists "${repo}__worktrees/feat-generated-branch" "wt new should still create the suggested worktree after excess backspace in the goal prompt"
+  assert_contains "$rendered_output" "What do you want to do in this worktree? add a guided onboarding flow" "wt new should keep the goal prompt text visible after excess backspace"
+  assert_contains "$output" "branch: feat/generated-branch" "wt new should still use the suggested branch after excess backspace in the goal prompt"
+}
+
 test_new_without_args_handles_multibyte_backspace_in_branch_prompt() {
   local repo fake_bin output opencode_log
   repo=$(make_repo)
@@ -621,6 +704,26 @@ test_new_without_args_handles_multibyte_backspace_in_branch_prompt() {
 
   assert_file_exists "${repo}__worktrees/fix-login-flake" "wt new should create the edited branch worktree after multibyte backspace in the branch prompt"
   assert_contains "$output" "branch: fix/login-flake" "wt new should accept the cleaned branch name after multibyte backspace"
+}
+
+test_new_without_args_keeps_branch_prompt_visible_after_excess_backspace() {
+  local repo fake_bin output opencode_log rendered_output
+  repo=$(make_repo)
+  fake_bin=$(make_fake_opencode_bin)
+  opencode_log=$(mktemp)
+
+  output=$(
+    cd "$repo" && \
+      PATH="$fake_bin:$PATH" \
+      WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
+      WT_TEST_OPENCODE_LOG="$opencode_log" \
+      run_in_pty $'investigate flaky login test\nabc\177\177\177\177\177fix/login-flake\n' bash "$ROOT/bin/wt" new
+  )
+  rendered_output=$(render_terminal_output "$output")
+
+  assert_file_exists "${repo}__worktrees/fix-login-flake" "wt new should create the edited branch worktree after excess backspace in the branch prompt"
+  assert_contains "$rendered_output" "Branch name [feat/generated-branch]: fix/login-flake" "wt new should keep the branch prompt text visible after excess backspace"
+  assert_contains "$output" "branch: fix/login-flake" "wt new should keep the edited branch name after excess backspace in the branch prompt"
 }
 
 test_new_without_args_requires_interactive_terminal() {
@@ -1534,7 +1637,9 @@ test_wrapper_new_changes_directory
 test_new_without_args_accepts_opencode_suggestion
 test_new_without_args_allows_editing_suggestion
 test_new_without_args_handles_multibyte_backspace_in_goal_prompt
+test_new_without_args_keeps_goal_prompt_visible_after_excess_backspace
 test_new_without_args_handles_multibyte_backspace_in_branch_prompt
+test_new_without_args_keeps_branch_prompt_visible_after_excess_backspace
 test_new_without_args_requires_interactive_terminal
 test_new_without_args_launches_opencode_when_confirmed
 test_new_without_args_skips_opencode_when_declined
