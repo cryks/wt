@@ -148,6 +148,27 @@ wt() {
         "$wt_bin" rm "$rm_target"
       fi
       ;;
+    merge)
+      shift
+      current_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+        "$wt_bin" merge "$@"
+        return $?
+      }
+      common_dir=$(git -C "$current_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || git -C "$current_root" rev-parse --git-common-dir)
+      common_dir=$(cd "$common_dir" && pwd -P)
+      main_root=$(dirname "$common_dir")
+
+      if [ "$current_root" = "$main_root" ]; then
+        "$wt_bin" merge "$@"
+        return $?
+      fi
+
+      if "$wt_bin" merge "$@"; then
+        builtin cd -- "$main_root"
+      else
+        return $?
+      fi
+      ;;
     *)
       "$wt_bin" "$@"
       ;;

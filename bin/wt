@@ -5,6 +5,7 @@ ENV_CANDIDATES=(".env" ".env.local" ".env.development.local")
 WT_MANAGED_LAUNCH_NAME="wt: attach browser"
 WT_DEBUG_PORT_DEFAULT="9222"
 WT_BRANCH_NAME_MODEL="opencode-go/kimi-k2.5"
+WT_MERGE_MODEL="${WT_MERGE_MODEL:-opencode-go/glm-5}"
 
 die() {
   printf '%s\n' "$*" >&2
@@ -29,6 +30,7 @@ Usage:
   wt b [branch-or-handle]
   wt cd <branch-or-handle>
   wt open <branch-or-handle>
+  wt merge
   wt rm [--force] [branch-or-handle]
   wt ls
   wt help
@@ -39,6 +41,7 @@ Commands:
   b      Open the current or requested worktree in the debug browser
   cd     Print the absolute path for a linked worktree
   open   Print the absolute path for a linked worktree
+  merge  Merge the current linked worktree into main and clean up
   rm     Remove a linked worktree conservatively
   ls     List the main checkout and linked worktrees
 
@@ -1269,6 +1272,105 @@ cmd_rm() {
   die "Removed worktree but failed to delete branch with git branch -d: $target_branch"
 }
 
+merge_head_exists() {
+  local worktree_root git_dir
+  worktree_root=$1
+  git_dir=$(git -C "$worktree_root" rev-parse --path-format=absolute --git-dir 2>/dev/null \
+    || git -C "$worktree_root" rev-parse --git-dir)
+  [ -f "$git_dir/MERGE_HEAD" ]
+}
+
+merge_feature_with_main() {
+  local feature_root feature_branch
+  feature_root=$1
+  feature_branch=$2
+
+  if git -C "$feature_root" merge main >/dev/null 2>&1; then
+    note "merge: resolved without conflicts"
+    return 0
+  fi
+
+  if ! merge_head_exists "$feature_root"; then
+    die "Merge failed for an unexpected reason"
+  fi
+
+  note "merge: conflicts detected, launching AI resolver"
+  require_command opencode
+
+  opencode --agent "Maat" --model "$WT_MERGE_MODEL" --dir "$feature_root" \
+    --prompt "Merge conflicts need to be resolved. Branch '$feature_branch' is merging 'main'. Examine the conflicts, resolve them, stage the files, and run 'git merge --continue --no-edit'." \
+    || true
+
+  if merge_head_exists "$feature_root"; then
+    warn "merge: conflicts not fully resolved, aborting"
+    git -C "$feature_root" merge --abort >/dev/null 2>&1 || true
+    die "Merge aborted: conflicts were not fully resolved"
+  fi
+
+  note "merge: conflicts resolved by AI"
+}
+
+merge_cleanup() {
+  local main_root feature_root feature_branch
+  main_root=$1
+  feature_root=$2
+  feature_branch=$3
+
+  git -C "$main_root" worktree remove "$feature_root" \
+    || die "Failed to remove worktree: $feature_root"
+  note "removed_worktree: $feature_root"
+
+  if git -C "$main_root" branch -d "$feature_branch" >/dev/null 2>&1; then
+    note "removed_branch: $feature_branch"
+  else
+    warn "branch_retained: $feature_branch"
+  fi
+}
+
+cmd_merge() {
+  local repo_root main_root feature_root feature_branch unique_commits i index
+
+  [ $# -eq 0 ] || die "Usage: wt merge"
+  require_git_repo
+
+  repo_root=$(get_repo_root)
+  main_root=$(get_main_repo_root)
+
+  list_worktrees
+  index=""
+  i=0
+  while [ $i -lt $WT_COUNT ]; do
+    if [ "${WT_PATHS[$i]}" = "$repo_root" ]; then
+      index=$i
+      break
+    fi
+    i=$((i + 1))
+  done
+  [ -n "$index" ] || die "Unable to resolve the current worktree"
+
+  feature_root="${WT_PATHS[$index]}"
+  feature_branch="${WT_BRANCHES[$index]}"
+
+  [ "${WT_TYPES[$index]}" != "main" ] || die "Cannot merge: already on the main worktree"
+  [ "$feature_branch" != "HEAD" ] || die "Cannot merge: current worktree has a detached HEAD"
+  [ "$(git_dirty_state "$feature_root")" = "clean" ] || die "Cannot merge: worktree has uncommitted changes"
+
+  unique_commits=$(git -C "$feature_root" log "main..$feature_branch" --oneline 2>/dev/null || true)
+  [ -n "$unique_commits" ] || die "Cannot merge: no commits ahead of main"
+
+  if git -C "$main_root" merge --ff-only "$feature_branch" >/dev/null 2>&1; then
+    note "merge: fast-forward"
+  else
+    merge_feature_with_main "$feature_root" "$feature_branch"
+
+    git -C "$main_root" merge --ff-only "$feature_branch" >/dev/null 2>&1 \
+      || die "Unexpected: fast-forward failed after reverse merge"
+    note "merge: main updated"
+  fi
+
+  merge_cleanup "$main_root" "$feature_root" "$feature_branch"
+}
+
 main() {
   local command
   command=${1-help}
@@ -1295,6 +1397,10 @@ main() {
     open)
       shift
       cmd_open "$@"
+      ;;
+    merge)
+      shift
+      cmd_merge "$@"
       ;;
     rm)
       shift

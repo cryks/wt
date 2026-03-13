@@ -57,6 +57,12 @@ List the main checkout and linked worktrees:
 wt ls
 ```
 
+Merge the current linked worktree into main and clean up:
+
+```bash
+wt merge
+```
+
 Remove a linked worktree conservatively:
 
 ```bash
@@ -76,6 +82,10 @@ wt rm --force feature/test
 - when a removed linked worktree is clean, it also tries `git branch -d`
 - with `wt rm --force`, it also uses `git branch -D`
 - it does not symlink `node_modules` or share generated framework directories
+- `wt merge` refuses dirty worktrees and branches with no commits ahead of main
+- `wt merge` merges main into the feature branch first to keep main safe from conflicts
+- `wt merge` uses AI (OpenCode with the Maat agent) to resolve conflicts when they occur
+- `wt merge` never pushes to a remote
 - real `cd` behavior requires sourcing `shell/wt.bash`, because a subprocess cannot change the parent shell directory
 
 Package manager detection is conservative and lockfile-first:

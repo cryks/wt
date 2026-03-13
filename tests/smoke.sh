@@ -206,6 +206,69 @@ sys.exit(proc.wait())
 PY
 }
 
+make_fake_opencode_merge_bin() {
+  local dir
+  dir=$(mktemp -d)
+  cat >"$dir/opencode" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+target_dir=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dir) target_dir=$2; shift ;;
+  esac
+  shift
+done
+
+[ -n "$target_dir" ] || exit 1
+
+cd "$target_dir"
+for file in $(git diff --name-only --diff-filter=U); do
+  python3 - "$file" <<'PY'
+import sys
+
+path = sys.argv[1]
+with open(path, "r") as f:
+    lines = f.readlines()
+
+result = []
+skip = False
+for line in lines:
+    if line.startswith("<<<<<<<"):
+        continue
+    if line.startswith("======="):
+        skip = True
+        continue
+    if line.startswith(">>>>>>>"):
+        skip = False
+        continue
+    if not skip:
+        result.append(line)
+
+with open(path, "w") as f:
+    f.writelines(result)
+PY
+  git add "$file"
+done
+
+git -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false merge --continue --no-edit
+EOF
+  chmod +x "$dir/opencode"
+  printf '%s\n' "$dir"
+}
+
+make_fake_opencode_noop_bin() {
+  local dir
+  dir=$(mktemp -d)
+  cat >"$dir/opencode" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$dir/opencode"
+  printf '%s\n' "$dir"
+}
+
 make_fake_devtools_bin() {
   local dir
   dir=$(mktemp -d)
@@ -900,6 +963,180 @@ test_b_rejects_non_devtools_listener_on_debug_port() {
   assert_eq "" "$(cat "$browser_log")" "wt b should not launch Chrome when the debug port is occupied by a non-DevTools listener"
 }
 
+configure_repo_for_merge() {
+  local repo
+  repo=$1
+  git -C "$repo" config user.name "wt"
+  git -C "$repo" config user.email "wt@example.com"
+  git -C "$repo" config commit.gpgsign "false"
+}
+
+test_merge_fast_forward() {
+  local repo worktree output expected_repo
+  repo=$(make_repo)
+  configure_repo_for_merge "$repo"
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  printf 'feature\n' >"$worktree/feature.txt"
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false add feature.txt >/dev/null
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false commit -m "add feature" >/dev/null
+
+  expected_repo=$(cd "$repo" && pwd -P)
+
+  output=$(PATH="/usr/bin:/bin:/usr/sbin:/sbin" bash <<EOF
+set -euo pipefail
+source "$ROOT/shell/wt.bash"
+cd "$worktree"
+wt merge
+printf 'cwd=%s\n' "\$(pwd -P)"
+EOF
+)
+
+  assert_contains "$output" "merge: fast-forward" "wt merge should report fast-forward"
+  assert_contains "$output" "removed_worktree:" "wt merge should remove the worktree"
+  assert_contains "$output" "removed_branch: feature/test" "wt merge should delete the branch"
+  assert_contains "$output" "cwd=$expected_repo" "wt merge wrapper should cd to main"
+  assert_file_missing "$worktree" "wt merge should remove the worktree directory"
+}
+
+test_merge_non_ff_clean() {
+  local repo worktree output expected_repo
+  repo=$(make_repo)
+  configure_repo_for_merge "$repo"
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  printf 'feature\n' >"$worktree/feature.txt"
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false add feature.txt >/dev/null
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false commit -m "add feature" >/dev/null
+
+  printf 'main change\n' >"$repo/main.txt"
+  commit_repo_state "$repo" "add main change"
+
+  expected_repo=$(cd "$repo" && pwd -P)
+
+  output=$(PATH="/usr/bin:/bin:/usr/sbin:/sbin" bash <<EOF
+set -euo pipefail
+source "$ROOT/shell/wt.bash"
+cd "$worktree"
+wt merge
+printf 'cwd=%s\n' "\$(pwd -P)"
+EOF
+)
+
+  assert_contains "$output" "merge: resolved without conflicts" "wt merge should report clean reverse merge"
+  assert_contains "$output" "merge: main updated" "wt merge should report main updated"
+  assert_contains "$output" "removed_worktree:" "wt merge should remove the worktree"
+  assert_contains "$output" "removed_branch: feature/test" "wt merge should delete the branch"
+  assert_contains "$output" "cwd=$expected_repo" "wt merge wrapper should cd to main"
+  assert_file_missing "$worktree" "wt merge should remove the worktree directory"
+  assert_file_exists "$repo/feature.txt" "main should contain the feature file after merge"
+  assert_file_exists "$repo/main.txt" "main should retain its own file after merge"
+}
+
+test_merge_refuses_dirty_worktree() {
+  local repo worktree output
+  repo=$(make_repo)
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+  touch "$worktree/dirty.txt"
+
+  if output=$(cd "$worktree" && bash "$ROOT/bin/wt" merge 2>&1); then
+    fail "wt merge should refuse a dirty worktree"
+  fi
+
+  assert_contains "$output" "Cannot merge: worktree has uncommitted changes" "wt merge should explain the dirty refusal"
+}
+
+test_merge_refuses_no_commits_ahead() {
+  local repo worktree output
+  repo=$(make_repo)
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  if output=$(cd "$worktree" && bash "$ROOT/bin/wt" merge 2>&1); then
+    fail "wt merge should refuse when no commits ahead"
+  fi
+
+  assert_contains "$output" "Cannot merge: no commits ahead of main" "wt merge should explain the no-commits refusal"
+}
+
+test_merge_refuses_main_worktree() {
+  local repo output
+  repo=$(make_repo)
+
+  if output=$(cd "$repo" && bash "$ROOT/bin/wt" merge 2>&1); then
+    fail "wt merge should refuse on the main worktree"
+  fi
+
+  assert_contains "$output" "Cannot merge: already on the main worktree" "wt merge should explain the main-worktree refusal"
+}
+
+test_merge_with_conflicts_ai_resolves() {
+  local repo worktree fake_bin output expected_repo
+  repo=$(make_repo)
+  configure_repo_for_merge "$repo"
+
+  printf 'original\n' >"$repo/shared.txt"
+  commit_repo_state "$repo" "add shared file"
+
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  printf 'feature change\n' >"$worktree/shared.txt"
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false add shared.txt >/dev/null
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false commit -m "feature change to shared" >/dev/null
+
+  printf 'main change\n' >"$repo/shared.txt"
+  commit_repo_state "$repo" "main change to shared"
+
+  fake_bin=$(make_fake_opencode_merge_bin)
+  expected_repo=$(cd "$repo" && pwd -P)
+
+  output=$(cd "$worktree" && PATH="$fake_bin:$PATH" bash "$ROOT/bin/wt" merge 2>&1)
+
+  assert_contains "$output" "merge: conflicts detected" "wt merge should detect conflicts"
+  assert_contains "$output" "merge: conflicts resolved by AI" "wt merge should report AI resolution"
+  assert_contains "$output" "removed_worktree:" "wt merge should remove the worktree after AI resolution"
+  assert_contains "$output" "removed_branch: feature/test" "wt merge should delete the branch after AI resolution"
+  assert_file_missing "$worktree" "wt merge should remove the worktree directory after AI resolution"
+  assert_file_exists "$repo/shared.txt" "main should contain the shared file after AI merge"
+}
+
+test_merge_with_conflicts_ai_fails() {
+  local repo worktree fake_bin output
+  repo=$(make_repo)
+  configure_repo_for_merge "$repo"
+
+  printf 'original\n' >"$repo/shared.txt"
+  commit_repo_state "$repo" "add shared file"
+
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  printf 'feature change\n' >"$worktree/shared.txt"
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false add shared.txt >/dev/null
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false commit -m "feature change to shared" >/dev/null
+
+  printf 'main change\n' >"$repo/shared.txt"
+  commit_repo_state "$repo" "main change to shared"
+
+  fake_bin=$(make_fake_opencode_noop_bin)
+
+  if output=$(cd "$worktree" && PATH="$fake_bin:$PATH" bash "$ROOT/bin/wt" merge 2>&1); then
+    fail "wt merge should fail when AI cannot resolve conflicts"
+  fi
+
+  assert_contains "$output" "merge: conflicts detected" "wt merge should detect conflicts"
+  assert_contains "$output" "Merge aborted: conflicts were not fully resolved" "wt merge should report abort"
+  assert_file_exists "$worktree" "wt merge should keep the worktree when AI fails"
+
+  local worktree_state
+  worktree_state=$(git_dirty_state "$worktree")
+  assert_eq "clean" "$worktree_state" "wt merge should abort the merge cleanly when AI fails"
+}
+
 test_new_runs_init_for_portless_worktree() {
   local repo fake_bin
   repo=$(make_repo)
@@ -938,5 +1175,12 @@ test_b_starts_debug_browser_for_current_worktree
 test_b_reuses_debug_browser_for_requested_worktree
 test_b_rejects_non_devtools_listener_on_debug_port
 test_new_runs_init_for_portless_worktree
+test_merge_fast_forward
+test_merge_non_ff_clean
+test_merge_refuses_dirty_worktree
+test_merge_refuses_no_commits_ahead
+test_merge_refuses_main_worktree
+test_merge_with_conflicts_ai_resolves
+test_merge_with_conflicts_ai_fails
 
 printf 'smoke tests passed\n'
