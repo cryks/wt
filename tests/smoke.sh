@@ -281,7 +281,8 @@ managed = configs[0]
 assert managed["name"] == "wt: attach browser"
 assert managed["request"] == "attach"
 assert managed["type"] == "chrome"
-assert managed["url"] == expected_url
+assert managed["urlFilter"] == f"{expected_url}/*"
+assert "url" not in managed
 assert managed["port"] == int(expected_port)
 assert managed["webRoot"] == "${workspaceFolder}"
 assert managed["internalConsoleOptions"] == "neverOpen"
