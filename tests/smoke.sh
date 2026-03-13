@@ -331,13 +331,7 @@ make_fake_opencode_merge_bin() {
 #!/usr/bin/env bash
 set -euo pipefail
 
-target_dir=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --dir) target_dir=$2; shift ;;
-  esac
-  shift
-done
+target_dir=${1-}
 
 [ -n "$target_dir" ] || exit 1
 
@@ -758,7 +752,7 @@ test_new_without_args_launches_opencode_when_confirmed() {
   assert_file_exists "${repo}__worktrees/feat-generated-branch" "wt new should create the suggested worktree before launching opencode"
   assert_contains "$output" "WT_TEST_OPENCODE_INTERACTIVE" "wt new should attach the launched opencode session to the terminal"
   assert_opencode_log_count "$opencode_log" 2 "wt new should call opencode twice when launch is confirmed"
-  assert_opencode_log_invocation_contains "$opencode_log" 1 "wt new should launch opencode in the new worktree with the original goal" "--agent" "Sisyphus (Ultraworker)" "--dir" "$expected_worktree" "--prompt" "add a guided onboarding flow"
+  assert_opencode_log_invocation_contains "$opencode_log" 1 "wt new should launch opencode in the new worktree with the original goal" "$expected_worktree" "--agent" "Sisyphus (Ultraworker)" "--prompt" "add a guided onboarding flow"
 }
 
 test_new_without_args_skips_opencode_when_declined() {
@@ -816,7 +810,7 @@ test_new_without_args_launches_opencode_with_original_goal_after_branch_edit() {
 
   assert_file_exists "${repo}__worktrees/fix-login-flake" "wt new should create the edited branch worktree before launching opencode"
   assert_opencode_log_count "$opencode_log" 2 "wt new should still launch opencode after editing the branch name"
-  assert_opencode_log_invocation_contains "$opencode_log" 1 "wt new should pass the original goal instead of the edited branch name" "--agent" "Sisyphus (Ultraworker)" "--dir" "$expected_worktree" "--prompt" "investigate flaky login test"
+  assert_opencode_log_invocation_contains "$opencode_log" 1 "wt new should pass the original goal instead of the edited branch name" "$expected_worktree" "--agent" "Sisyphus (Ultraworker)" "--prompt" "investigate flaky login test"
 }
 
 test_new_with_explicit_branch_does_not_launch_opencode() {
@@ -869,7 +863,7 @@ test_wrapper_new_without_args_launches_opencode_and_changes_directory() {
   assert_contains "$actual" "$expected" "sourced wrapper should cd into the AI-selected worktree after launching opencode"
   assert_contains "$actual" "WT_TEST_OPENCODE_INTERACTIVE" "sourced wrapper should keep the opencode session attached to the terminal"
   assert_opencode_log_count "$opencode_log" 2 "sourced wrapper wt new should launch opencode after branch generation"
-  assert_opencode_log_invocation_contains "$opencode_log" 1 "sourced wrapper wt new should launch opencode in the new worktree" "--agent" "Sisyphus (Ultraworker)" "--dir" "$expected" "--prompt" "add a guided onboarding flow"
+  assert_opencode_log_invocation_contains "$opencode_log" 1 "sourced wrapper wt new should launch opencode in the new worktree" "$expected" "--agent" "Sisyphus (Ultraworker)" "--prompt" "add a guided onboarding flow"
 }
 
 test_wrapper_cd_missing_target_keeps_shell_alive() {
@@ -961,7 +955,7 @@ test_zsh_wrapper_new_without_args_launches_opencode_and_changes_directory() {
   assert_contains "$actual" "$expected" "zsh wrapper should cd into the AI-selected worktree after launching opencode"
   assert_contains "$actual" "WT_TEST_OPENCODE_INTERACTIVE" "zsh wrapper should keep the opencode session attached to the terminal"
   assert_opencode_log_count "$opencode_log" 2 "zsh wrapper wt new should launch opencode after branch generation"
-  assert_opencode_log_invocation_contains "$opencode_log" 1 "zsh wrapper wt new should launch opencode in the new worktree" "--agent" "Sisyphus (Ultraworker)" "--dir" "$expected" "--prompt" "add a guided onboarding flow"
+  assert_opencode_log_invocation_contains "$opencode_log" 1 "zsh wrapper wt new should launch opencode in the new worktree" "$expected" "--agent" "Sisyphus (Ultraworker)" "--prompt" "add a guided onboarding flow"
 }
 
 test_cd_missing_target_fails() {

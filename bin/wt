@@ -1120,7 +1120,7 @@ launch_opencode_in_worktree() {
   target_root=$1
   goal=$2
 
-  command=(opencode --agent "$WT_NEW_WORKTREE_AGENT" --dir "$target_root" --prompt "$goal")
+  command=(opencode "$target_root" --agent "$WT_NEW_WORKTREE_AGENT" --prompt "$goal")
   if ! "${command[@]}" <&0 >&2 2>&2; then
     warn "opencode launch failed in: $target_root"
   fi
@@ -1350,7 +1350,7 @@ merge_feature_with_primary() {
   note "merge: conflicts detected, launching AI resolver"
   require_command opencode
 
-  opencode --agent "Maat" --model "$WT_MERGE_MODEL" --dir "$feature_root" \
+  opencode "$feature_root" --agent "Maat" --model "$WT_MERGE_MODEL" \
     --prompt "Merge conflicts need to be resolved. Branch '$feature_branch' is merging '$primary_branch'. Examine the conflicts, resolve them, stage the files, and run 'git merge --continue --no-edit'." \
     || true
 

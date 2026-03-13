@@ -48,13 +48,13 @@ This design ensures the primary branch never has a dirty merge commit — the fe
 
 ### OpenCode integration points
 
-There are two distinct OpenCode integration points, each using a different model and protocol:
+There are three distinct OpenCode integration points, each using a different model and protocol:
 
-1. **Branch name suggestion** (`suggest_branch_name_with_opencode`): Uses `opencode run --format json` with `WT_BRANCH_NAME_MODEL` (default: `opencode-go/kimi-k2.5`). Parses newline-delimited JSON events, extracting `type: "text"` parts. The prompt constrains the output to a single valid `git check-ref-format` branch name.
+1. **Branch name suggestion** (`suggest_branch_name_with_opencode`): Uses `opencode run --format json` with `WT_BRANCH_NAME_MODEL` (default: `opencode-go/kimi-k2.5`). Parses newline-delimited JSON events, extracting `type: "text"` parts. The prompt constrains the output to a single valid `git check-ref-format` branch name. The `run` subcommand accepts `--dir` to set the working directory.
 
-2. **Merge conflict resolution** (`merge_feature_with_primary`): Uses `opencode --agent "Maat" --model "$WT_MERGE_MODEL"`. This is an interactive agent session, not `run` mode. The agent is instructed to examine conflicts, resolve them, stage files, and run `git merge --continue`.
+2. **Merge conflict resolution** (`merge_feature_with_primary`): Uses `opencode <project-path> --agent "Maat" --model "$WT_MERGE_MODEL"`. This is an interactive agent session, not `run` mode. The project path is passed as a positional argument (not `--dir`, which is only valid for the `run` and `attach` subcommands). The agent is instructed to examine conflicts, resolve them, stage files, and run `git merge --continue`.
 
-3. **New worktree autostart** (`launch_opencode_in_worktree`): Uses `opencode --agent "$WT_NEW_WORKTREE_AGENT" --prompt "$goal"`. Launches an interactive OpenCode session in the new worktree with the user's original goal description, attached to the terminal's stdin/stdout.
+3. **New worktree autostart** (`launch_opencode_in_worktree`): Uses `opencode <project-path> --agent "$WT_NEW_WORKTREE_AGENT" --prompt "$goal"`. The project path is the first positional argument. Launches an interactive OpenCode session in the new worktree with the user's original goal description, attached to the terminal's stdin/stdout.
 
 ### Shell wrapper design (`shell/wt.bash`)
 
