@@ -121,6 +121,91 @@ EOF
   printf '%s\n' "$dir"
 }
 
+make_fake_opencode_bin() {
+  local dir
+  dir=$(mktemp -d)
+  cat >"$dir/opencode" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+python3 - "${WT_TEST_OPENCODE_LOG-}" "$@" <<'PY'
+import json
+import sys
+
+log_path = sys.argv[1]
+args = sys.argv[2:]
+if log_path:
+    with open(log_path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(args) + "\n")
+PY
+
+branch=${WT_TEST_OPENCODE_BRANCH:-feat/default-branch}
+python3 - "$branch" <<'PY'
+import json
+import sys
+
+branch = sys.argv[1]
+print(json.dumps({"type": "step_start", "part": {"type": "step-start"}}))
+print(json.dumps({"type": "text", "part": {"type": "text", "text": branch}}))
+print(json.dumps({"type": "step_finish", "part": {"type": "step-finish", "reason": "stop"}}))
+PY
+EOF
+  chmod +x "$dir/opencode"
+  printf '%s\n' "$dir"
+}
+
+run_in_pty() {
+  local input
+  input=$1
+  shift
+
+  python3 - "$input" "$@" <<'PY'
+import os
+import pty
+import select
+import subprocess
+import sys
+import time
+
+input_data = sys.argv[1].encode("utf-8")
+command = sys.argv[2:]
+
+master_fd, slave_fd = pty.openpty()
+proc = subprocess.Popen(command, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, close_fds=True)
+os.close(slave_fd)
+
+if input_data:
+    time.sleep(0.1)
+    os.write(master_fd, input_data)
+
+chunks = []
+while True:
+    ready, _, _ = select.select([master_fd], [], [], 0.1)
+    if ready:
+        try:
+            chunk = os.read(master_fd, 4096)
+        except OSError:
+            chunk = b""
+        if chunk:
+            chunks.append(chunk)
+        elif proc.poll() is not None:
+            break
+    elif proc.poll() is not None:
+        try:
+            chunk = os.read(master_fd, 4096)
+        except OSError:
+            chunk = b""
+        if chunk:
+            chunks.append(chunk)
+            continue
+        break
+
+os.close(master_fd)
+sys.stdout.buffer.write(b"".join(chunks))
+sys.exit(proc.wait())
+PY
+}
+
 make_fake_devtools_bin() {
   local dir
   dir=$(mktemp -d)
@@ -341,6 +426,73 @@ EOF
   assert_eq "$expected" "$actual" "sourced wrapper should cd into the new worktree"
 }
 
+test_new_without_args_accepts_opencode_suggestion() {
+  local repo fake_bin opencode_log output prompt_log
+  repo=$(make_repo)
+  fake_bin=$(make_fake_opencode_bin)
+  opencode_log=$(mktemp)
+
+  output=$(
+    cd "$repo" && \
+      PATH="$fake_bin:$PATH" \
+      WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
+      WT_TEST_OPENCODE_LOG="$opencode_log" \
+      run_in_pty $'add a guided onboarding flow\n\n' bash "$ROOT/bin/wt" new
+  )
+
+  assert_file_exists "${repo}__worktrees/feat-generated-branch" "wt new without args should create the suggested worktree"
+  assert_contains "$output" "branch: feat/generated-branch" "wt new without args should use the suggested branch by default"
+  prompt_log=$(cat "$opencode_log")
+  assert_contains "$prompt_log" "opencode-go/kimi-k2.5" "wt new without args should request the dedicated branch-name model"
+  assert_contains "$prompt_log" "add a guided onboarding flow" "wt new without args should send the user's intent to OpenCode"
+  assert_contains "$prompt_log" "Return exactly one Git branch name and nothing else." "wt new without args should constrain the OpenCode response"
+}
+
+test_new_without_args_allows_editing_suggestion() {
+  local repo fake_bin output opencode_log
+  repo=$(make_repo)
+  fake_bin=$(make_fake_opencode_bin)
+  opencode_log=$(mktemp)
+
+  output=$(
+    cd "$repo" && \
+      PATH="$fake_bin:$PATH" \
+      WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
+      WT_TEST_OPENCODE_LOG="$opencode_log" \
+      run_in_pty $'investigate flaky login test\nfix/login-flake\n' bash "$ROOT/bin/wt" new
+  )
+
+  assert_file_exists "${repo}__worktrees/fix-login-flake" "wt new without args should create the edited branch worktree"
+  assert_contains "$output" "branch: fix/login-flake" "wt new without args should use the edited branch name"
+}
+
+test_new_without_args_requires_interactive_terminal() {
+  local repo output fake_bin
+  repo=$(make_repo)
+  fake_bin=$(make_fake_opencode_bin)
+
+  if output=$(cd "$repo" && printf 'add a guided onboarding flow\n' | PATH="$fake_bin:$PATH" bash "$ROOT/bin/wt" new 2>&1 >/dev/null); then
+    fail "wt new without args should fail outside an interactive terminal"
+  fi
+
+  assert_contains "$output" "wt new without a branch requires an interactive terminal" "wt new without args should explain the tty requirement"
+}
+
+test_wrapper_new_without_args_changes_directory() {
+  local repo expected actual fake_bin
+  repo=$(make_repo)
+  fake_bin=$(make_fake_opencode_bin)
+
+  actual=$(PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
+    run_in_pty $'add a guided onboarding flow\n\n' \
+    bash -lc 'source "$1/shell/wt.bash" && cd "$2" && wt new >/dev/null && pwd -P' bash "$ROOT" "$repo")
+
+  expected=$(cd "${repo}__worktrees/feat-generated-branch" && pwd -P)
+
+  assert_contains "$actual" "$expected" "sourced wrapper should cd into the AI-selected worktree"
+}
+
 test_wrapper_cd_missing_target_keeps_shell_alive() {
   local repo actual expected
   repo=$(make_repo)
@@ -395,6 +547,21 @@ EOF
   expected=$(cd "${repo}__worktrees/feature-test" && pwd -P)
 
   assert_eq "$expected" "$actual" "zsh wrapper should cd into the new worktree"
+}
+
+test_zsh_wrapper_new_without_args_changes_directory() {
+  local repo expected actual fake_bin
+  repo=$(make_repo)
+  fake_bin=$(make_fake_opencode_bin)
+
+  actual=$(PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
+    run_in_pty $'add a guided onboarding flow\n\n' \
+    zsh -lc 'source "$1/shell/wt.bash" && cd "$2" && wt new >/dev/null && pwd -P' zsh "$ROOT" "$repo")
+
+  expected=$(cd "${repo}__worktrees/feat-generated-branch" && pwd -P)
+
+  assert_contains "$actual" "$expected" "zsh wrapper should cd into the AI-selected worktree"
 }
 
 test_cd_missing_target_fails() {
@@ -748,9 +915,14 @@ test_new_runs_init_for_portless_worktree() {
 test_cd_matches_open
 test_wrapper_cd_changes_directory
 test_wrapper_new_changes_directory
+test_new_without_args_accepts_opencode_suggestion
+test_new_without_args_allows_editing_suggestion
+test_new_without_args_requires_interactive_terminal
+test_wrapper_new_without_args_changes_directory
 test_wrapper_cd_missing_target_keeps_shell_alive
 test_zsh_wrapper_cd_changes_directory
 test_zsh_wrapper_new_changes_directory
+test_zsh_wrapper_new_without_args_changes_directory
 test_cd_missing_target_fails
 test_wrapper_rm_without_args_removes_current_worktree_and_branch
 test_wrapper_rm_without_args_refuses_on_main

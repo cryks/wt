@@ -18,8 +18,28 @@ _wt_bin_path() {
   printf '%s\n' "$script_dir/../bin/wt"
 }
 
+_wt_output_field() {
+  local output field prefix line
+  output=$1
+  field=$2
+  prefix="$field: "
+
+  while IFS= read -r line; do
+    case "$line" in
+      "$prefix"*)
+        printf '%s\n' "${line#"$prefix"}"
+        return 0
+        ;;
+    esac
+  done <<EOF
+$output
+EOF
+
+  return 1
+}
+
 wt() {
-  local wt_bin target_path branch rm_force rm_target current_root main_root current_branch common_dir
+  local wt_bin target_path branch rm_force rm_target current_root main_root current_branch common_dir new_output wt_status
   wt_bin=$(_wt_bin_path)
   [ -x "$wt_bin" ] || {
     printf 'wt wrapper error: missing executable at %s\n' "$wt_bin" >&2
@@ -42,12 +62,18 @@ wt() {
       builtin cd -- "$target_path"
       ;;
     new)
-      branch=${2-}
-      "$wt_bin" "$@" || return $?
-      if target_path=$("$wt_bin" cd "$branch"); then
+      if new_output=$("$wt_bin" "$@"); then
+        wt_status=0
+      else
+        wt_status=$?
+      fi
+      [ -z "$new_output" ] || printf '%s\n' "$new_output"
+      [ $wt_status -eq 0 ] || return $wt_status
+      if target_path=$(_wt_output_field "$new_output" "worktree_path"); then
         :
       else
-        return $?
+        printf 'wt wrapper error: missing worktree_path in wt new output\n' >&2
+        return 1
       fi
       builtin cd -- "$target_path"
       ;;
