@@ -530,6 +530,45 @@ test_new_without_args_allows_editing_suggestion() {
   assert_contains "$output" "branch: fix/login-flake" "wt new without args should use the edited branch name"
 }
 
+test_new_without_args_handles_multibyte_backspace_in_goal_prompt() {
+  local repo fake_bin opencode_log output prompt_log
+  repo=$(make_repo)
+  fake_bin=$(make_fake_opencode_bin)
+  opencode_log=$(mktemp)
+
+  output=$(
+    cd "$repo" && \
+      PATH="$fake_bin:$PATH" \
+      WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
+      WT_TEST_OPENCODE_LOG="$opencode_log" \
+      run_in_pty $'あ\177add a guided onboarding flow\n\n' bash "$ROOT/bin/wt" new
+  )
+
+  assert_file_exists "${repo}__worktrees/feat-generated-branch" "wt new without args should still create the suggested worktree after multibyte backspace in the goal prompt"
+  prompt_log=$(cat "$opencode_log")
+  assert_contains "$prompt_log" "User intent: add a guided onboarding flow" "wt new should pass the cleaned goal to OpenCode after multibyte backspace"
+  assert_not_contains "$prompt_log" "User intent: あ" "wt new should not leak partial multibyte input into the OpenCode goal prompt"
+  assert_contains "$output" "branch: feat/generated-branch" "wt new should keep using the suggested branch after multibyte backspace in the goal prompt"
+}
+
+test_new_without_args_handles_multibyte_backspace_in_branch_prompt() {
+  local repo fake_bin output opencode_log
+  repo=$(make_repo)
+  fake_bin=$(make_fake_opencode_bin)
+  opencode_log=$(mktemp)
+
+  output=$(
+    cd "$repo" && \
+      PATH="$fake_bin:$PATH" \
+      WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
+      WT_TEST_OPENCODE_LOG="$opencode_log" \
+      run_in_pty $'investigate flaky login test\nあ\177fix/login-flake\n' bash "$ROOT/bin/wt" new
+  )
+
+  assert_file_exists "${repo}__worktrees/fix-login-flake" "wt new should create the edited branch worktree after multibyte backspace in the branch prompt"
+  assert_contains "$output" "branch: fix/login-flake" "wt new should accept the cleaned branch name after multibyte backspace"
+}
+
 test_new_without_args_requires_interactive_terminal() {
   local repo output fake_bin
   repo=$(make_repo)
@@ -1300,6 +1339,8 @@ test_wrapper_cd_changes_directory
 test_wrapper_new_changes_directory
 test_new_without_args_accepts_opencode_suggestion
 test_new_without_args_allows_editing_suggestion
+test_new_without_args_handles_multibyte_backspace_in_goal_prompt
+test_new_without_args_handles_multibyte_backspace_in_branch_prompt
 test_new_without_args_requires_interactive_terminal
 test_wrapper_new_without_args_changes_directory
 test_wrapper_cd_missing_target_keeps_shell_alive
