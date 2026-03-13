@@ -4,6 +4,7 @@ set -euo pipefail
 ENV_CANDIDATES=(".env" ".env.local" ".env.development.local")
 WT_MANAGED_LAUNCH_NAME="wt: attach browser"
 WT_DEBUG_PORT_DEFAULT="9222"
+WT_BRANCH_NAME_MODEL="opencode-go/kimi-k2.5"
 
 die() {
   printf '%s\n' "$*" >&2
@@ -23,7 +24,7 @@ print_help() {
 wt - thin git worktree helper for Node.js repositories
 
 Usage:
-  wt new <branch>
+  wt new [branch]
   wt init
   wt b [branch-or-handle]
   wt cd <branch-or-handle>
@@ -33,7 +34,7 @@ Usage:
   wt help
 
 Commands:
-  new    Create or attach a worktree in <repo>__worktrees/<handle>
+  new    Create or attach a worktree; with no branch, ask and suggest one
   init   Generate or update .vscode/launch.json for the current worktree
   b      Open the current or requested worktree in the debug browser
   cd     Print the absolute path for a linked worktree
@@ -958,11 +959,147 @@ cmd_b() {
   note "debug_url: $url"
 }
 
-cmd_new() {
-  local branch repo_root worktree_root handle target_path env_copied package_manager i
-  [ $# -eq 1 ] || die "Usage: wt new <branch>"
+require_interactive_terminal() {
+  [ -t 0 ] || die "wt new without a branch requires an interactive terminal. Use: wt new <branch>"
+}
+
+prompt_for_new_worktree_goal() {
+  local goal
+
+  while :; do
+    printf 'What do you want to do in this worktree? ' >&2
+    IFS= read -r goal || die "Cancelled wt new"
+    if [ -n "$goal" ]; then
+      printf '%s\n' "$goal"
+      return 0
+    fi
+    warn "Please describe what you want to do in the new worktree"
+  done
+}
+
+build_branch_name_generation_prompt() {
+  local repo_name goal
+  repo_name=$1
+  goal=$2
+
+  cat <<EOF
+You generate Git branch names for a local worktree helper.
+
+Repository: $repo_name
+User intent: $goal
+
+Return exactly one Git branch name and nothing else.
+
+Rules:
+- Lowercase ASCII only
+- Keep it short, specific, and descriptive
+- Prefer prefixes like feat/, fix/, chore/, docs/, refactor/, or test/ when they fit
+- Use only letters, numbers, /, -, and .
+- No spaces, quotes, code fences, or explanations
+- The output must be valid for git check-ref-format --branch
+EOF
+}
+
+extract_text_from_opencode_json() {
+  require_python3
+
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+texts = []
+
+for raw_line in sys.argv[1].splitlines():
+    line = raw_line.strip()
+    if not line:
+        continue
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Failed to parse OpenCode JSON output: {exc}")
+
+    event_type = event.get("type")
+    if event_type == "error":
+        error = event.get("error") or {}
+        data = error.get("data") or {}
+        message = data.get("message") or error.get("name") or "OpenCode returned an error"
+        raise SystemExit(message)
+
+    if event_type != "text":
+        continue
+
+    part = event.get("part") or {}
+    text = part.get("text")
+    if isinstance(text, str):
+        texts.append(text)
+
+if not texts:
+    raise SystemExit("OpenCode returned no text suggestion")
+
+combined = "".join(texts).strip()
+for line in combined.splitlines():
+    candidate = line.strip()
+    if candidate:
+        print(candidate)
+        raise SystemExit(0)
+
+raise SystemExit("OpenCode returned an empty suggestion")
+PY
+}
+
+suggest_branch_name_with_opencode() {
+  local repo_root goal repo_name prompt raw_output suggestion
+  repo_root=$1
+  goal=$2
+
+  require_command opencode
+  repo_name=$(basename "$repo_root")
+  prompt=$(build_branch_name_generation_prompt "$repo_name" "$goal")
+  raw_output=$(opencode run --format json -m "$WT_BRANCH_NAME_MODEL" --dir "$repo_root" "$prompt") || die "OpenCode failed to suggest a branch name"
+  suggestion=$(extract_text_from_opencode_json "$raw_output") || die "Failed to parse the OpenCode branch suggestion"
+
+  printf '%s\n' "$suggestion"
+}
+
+branch_name_is_valid() {
+  local branch normalized_branch
   branch=$1
-  require_git_repo
+  [ -n "$branch" ] || return 1
+  normalized_branch=$(git check-ref-format --branch "$branch" 2>/dev/null) || return 1
+  [ "$normalized_branch" = "$branch" ]
+}
+
+confirm_branch_name() {
+  local branch response
+  branch=$1
+
+  while :; do
+    printf 'Branch name [%s]: ' "$branch" >&2
+    IFS= read -r response || die "Cancelled wt new"
+    if [ -n "$response" ]; then
+      branch=$response
+    fi
+    if branch_name_is_valid "$branch"; then
+      printf '%s\n' "$branch"
+      return 0
+    fi
+    warn "Invalid Git branch name: $branch"
+  done
+}
+
+resolve_branch_name_for_new_worktree() {
+  local repo_root goal suggestion branch
+  repo_root=$1
+
+  goal=$(prompt_for_new_worktree_goal)
+  suggestion=$(suggest_branch_name_with_opencode "$repo_root" "$goal")
+  branch=$(confirm_branch_name "$suggestion")
+  printf '%s\n' "$branch"
+}
+
+create_worktree_for_branch() {
+  local branch repo_root worktree_root handle target_path env_copied package_manager i
+  branch=$1
 
   repo_root=$(get_main_repo_root)
   worktree_root=$(get_worktree_root)
@@ -1015,6 +1152,22 @@ cmd_new() {
   note "next: cd \"$(printf '%s' "$target_path")\""
   note "next: wt open $branch"
   note "portless: if this repo uses portless, linked worktrees should get distinct local URLs when you start the app yourself"
+}
+
+cmd_new() {
+  local branch current_repo_root
+  [ $# -le 1 ] || die "Usage: wt new [branch]"
+  require_git_repo
+
+  if [ $# -eq 0 ]; then
+    require_interactive_terminal
+    current_repo_root=$(get_repo_root)
+    branch=$(resolve_branch_name_for_new_worktree "$current_repo_root")
+  else
+    branch=$1
+  fi
+
+  create_worktree_for_branch "$branch"
 }
 
 cmd_rm() {
