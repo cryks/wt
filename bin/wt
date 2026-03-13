@@ -408,7 +408,7 @@ managed = {
     "name": managed_name,
     "address": "localhost",
     "port": int(debug_port),
-    "url": url,
+    "urlFilter": f"{url}/*",
     "webRoot": "${workspaceFolder}",
     "resolveSourceMapLocations": [
         "${workspaceFolder}/**",
