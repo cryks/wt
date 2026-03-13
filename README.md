@@ -19,13 +19,16 @@ Add `/Users/rbr/work/wt/bin` to your `PATH`:
 export PATH="/Users/rbr/work/wt/bin:$PATH"
 ```
 
-Optional shell helper if you want `cd` behavior:
+Optional shell helper if you want `cd` behavior in Bash or zsh:
 
 ```bash
-wto() {
-  cd "$(wt open "$1")"
-}
+source "/Users/rbr/work/wt/shell/wt.bash"
 ```
+
+After sourcing that file, `wt cd <name>` changes into the linked worktree in your current shell,
+and `wt new <branch>` also moves you into the newly created worktree when it succeeds.
+The wrapper resolves the bundled `bin/wt` directly, so it does not depend on `command wt` lookup.
+The `wt --help` output still describes the binary itself, while the sourced wrapper adds shell-level `cd` behavior.
 
 ## Commands
 
@@ -33,6 +36,12 @@ Create a linked worktree for a branch:
 
 ```bash
 wt new feature/test
+```
+
+Change into a linked worktree by branch or handle:
+
+```bash
+wt cd feature/test
 ```
 
 Print the absolute path for a linked worktree:
@@ -63,6 +72,7 @@ wt rm --force feature/test
 - it refuses locked worktrees in v1
 - it refuses dirty worktrees unless you pass `--force`
 - it does not symlink `node_modules` or share generated framework directories
+- real `cd` behavior requires sourcing `shell/wt.bash`, because a subprocess cannot change the parent shell directory
 
 Package manager detection is conservative and lockfile-first:
 - `pnpm-lock.yaml` -> `pnpm install --prefer-offline`

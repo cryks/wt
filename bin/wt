@@ -22,6 +22,7 @@ wt - thin git worktree helper for Node.js repositories
 
 Usage:
   wt new <branch>
+  wt cd <branch-or-handle>
   wt open <branch-or-handle>
   wt rm [--force] <branch-or-handle>
   wt ls
@@ -29,6 +30,7 @@ Usage:
 
 Commands:
   new    Create or attach a worktree in <repo>__worktrees/<handle>
+  cd     Print the absolute path for a linked worktree
   open   Print the absolute path for a linked worktree
   rm     Remove a linked worktree conservatively
   ls     List the main checkout and linked worktrees
@@ -213,6 +215,7 @@ WT_BRANCHES=()
 WT_TYPES=()
 WT_HANDLES=()
 WT_STATES=()
+WT_TARGET_INDEX=""
 
 append_worktree_record() {
   local repo_root worktree_root path branch type handle state dirty annotation
@@ -335,6 +338,8 @@ resolve_worktree_target() {
   [ -n "$query" ] || die "A branch or handle is required"
   list_worktrees
 
+  WT_TARGET_INDEX=""
+
   handle_match_index=""
   branch_match_index=""
   i=0
@@ -352,11 +357,11 @@ resolve_worktree_target() {
     die "Ambiguous target '$query': handle -> ${WT_PATHS[$handle_match_index]}, branch -> ${WT_PATHS[$branch_match_index]}"
   fi
   if [ -n "$handle_match_index" ]; then
-    printf '%s\n' "$handle_match_index"
+    WT_TARGET_INDEX=$handle_match_index
     return 0
   fi
   if [ -n "$branch_match_index" ]; then
-    printf '%s\n' "$branch_match_index"
+    WT_TARGET_INDEX=$branch_match_index
     return 0
   fi
 
@@ -377,13 +382,23 @@ format_table_row() {
   printf "%-${c1w}s  %-${c2w}s  %-${c3w}s  %-${c4w}s  %s\n" "$c1" "$c2" "$c3" "$c4" "$c5"
 }
 
-cmd_open() {
+print_worktree_target_path() {
   local target index
   [ $# -eq 1 ] || die "Usage: wt open <branch-or-handle>"
   target=$1
   require_git_repo
-  index=$(resolve_worktree_target "$target")
+  resolve_worktree_target "$target"
+  index=$WT_TARGET_INDEX
   printf '%s\n' "${WT_PATHS[$index]}"
+}
+
+cmd_open() {
+  print_worktree_target_path "$@"
+}
+
+cmd_cd() {
+  [ $# -eq 1 ] || die "Usage: wt cd <branch-or-handle>"
+  print_worktree_target_path "$1"
 }
 
 cmd_ls() {
@@ -406,11 +421,11 @@ cmd_ls() {
     i=$((i + 1))
   done
 
-  format_table_row "$width_type" "$width_branch" "$width_handle" "$width_state" "TYPE" "BRANCH" "HANDLE" "STATE" "PATH"
+  format_table_row "$width_branch" "$width_handle" "$width_type" "$width_state" "BRANCH" "HANDLE" "TYPE" "STATE" "PATH"
   i=0
   while [ $i -lt $WT_COUNT ]; do
-    format_table_row "$width_type" "$width_branch" "$width_handle" "$width_state" \
-      "${WT_TYPES[$i]}" "${WT_BRANCHES[$i]}" "${WT_HANDLES[$i]}" "${WT_STATES[$i]}" "${WT_PATHS[$i]}"
+    format_table_row "$width_branch" "$width_handle" "$width_type" "$width_state" \
+      "${WT_BRANCHES[$i]}" "${WT_HANDLES[$i]}" "${WT_TYPES[$i]}" "${WT_STATES[$i]}" "${WT_PATHS[$i]}"
     i=$((i + 1))
   done
 }
@@ -496,7 +511,8 @@ cmd_rm() {
   [ -n "$target" ] || die "Usage: wt rm [--force] <branch-or-handle>"
   require_git_repo
   repo_root=$(get_repo_root)
-  index=$(resolve_worktree_target "$target")
+  resolve_worktree_target "$target"
+  index=$WT_TARGET_INDEX
 
   target_path=${WT_PATHS[$index]}
   target_state=${WT_STATES[$index]}
@@ -536,6 +552,10 @@ main() {
     new)
       shift
       cmd_new "$@"
+      ;;
+    cd)
+      shift
+      cmd_cd "$@"
       ;;
     open)
       shift
