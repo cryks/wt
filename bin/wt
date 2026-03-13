@@ -6,6 +6,10 @@ WT_MANAGED_LAUNCH_NAME="wt: attach browser"
 WT_DEBUG_PORT_DEFAULT="9222"
 WT_BRANCH_NAME_MODEL="opencode-go/kimi-k2.5"
 WT_MERGE_MODEL="${WT_MERGE_MODEL:-opencode-go/glm-5}"
+WT_NEW_WORKTREE_AGENT="Sisyphus (Ultraworker)"
+WT_NEW_WORKTREE_BRANCH=""
+WT_NEW_WORKTREE_GOAL=""
+WT_NEW_WORKTREE_AUTOSTART=0
 
 die() {
   printf '%s\n' "$*" >&2
@@ -1098,14 +1102,46 @@ confirm_branch_name() {
   done
 }
 
-resolve_branch_name_for_new_worktree() {
+prompt_for_new_worktree_opencode_autostart() {
+  local response
+
+  while :; do
+    printf 'Launch opencode with this prompt? (y/n) ' >&2
+    IFS= read -e -r response || die "Cancelled wt new"
+    case "$response" in
+      y|Y) return 0 ;;
+      n|N) return 1 ;;
+      *) warn "Please answer y or n" ;;
+    esac
+  done
+}
+
+launch_opencode_in_worktree() {
+  local target_root goal
+  local -a command
+  target_root=$1
+  goal=$2
+
+  command=(opencode --agent "$WT_NEW_WORKTREE_AGENT" --dir "$target_root" --prompt "$goal")
+  if ! "${command[@]}" <&0 >&2 2>&2; then
+    warn "opencode launch failed in: $target_root"
+  fi
+}
+
+resolve_new_worktree_request() {
   local repo_root goal suggestion branch
   repo_root=$1
 
   goal=$(prompt_for_new_worktree_goal)
   suggestion=$(suggest_branch_name_with_opencode "$repo_root" "$goal")
   branch=$(confirm_branch_name "$suggestion")
-  printf '%s\n' "$branch"
+
+  WT_NEW_WORKTREE_GOAL=$goal
+  WT_NEW_WORKTREE_BRANCH=$branch
+  WT_NEW_WORKTREE_AUTOSTART=0
+  if prompt_for_new_worktree_opencode_autostart; then
+    WT_NEW_WORKTREE_AUTOSTART=1
+  fi
 }
 
 create_worktree_for_branch() {
@@ -1166,19 +1202,29 @@ create_worktree_for_branch() {
 }
 
 cmd_new() {
-  local branch current_repo_root
+  local branch current_repo_root target_path
   [ $# -le 1 ] || die "Usage: wt new [branch]"
   require_git_repo
+
+  WT_NEW_WORKTREE_BRANCH=""
+  WT_NEW_WORKTREE_GOAL=""
+  WT_NEW_WORKTREE_AUTOSTART=0
 
   if [ $# -eq 0 ]; then
     require_interactive_terminal
     current_repo_root=$(get_repo_root)
-    branch=$(resolve_branch_name_for_new_worktree "$current_repo_root")
+    resolve_new_worktree_request "$current_repo_root"
+    branch=$WT_NEW_WORKTREE_BRANCH
   else
     branch=$1
   fi
 
   create_worktree_for_branch "$branch"
+
+  if [ $WT_NEW_WORKTREE_AUTOSTART -eq 1 ]; then
+    target_path="$(get_worktree_root)/$(normalize_handle "$branch")"
+    launch_opencode_in_worktree "$target_path" "$WT_NEW_WORKTREE_GOAL"
+  fi
 }
 
 cmd_rm() {

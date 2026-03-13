@@ -140,6 +140,13 @@ if log_path:
         handle.write(json.dumps(args) + "\n")
 PY
 
+if [ "${1-}" != "run" ]; then
+  if [ "${WT_TEST_OPENCODE_STDOUT_MARKER-}" != "" ]; then
+    printf '%s\n' "$WT_TEST_OPENCODE_STDOUT_MARKER"
+  fi
+  exit 0
+fi
+
 branch=${WT_TEST_OPENCODE_BRANCH:-feat/default-branch}
 python3 - "$branch" <<'PY'
 import json
@@ -153,6 +160,53 @@ PY
 EOF
   chmod +x "$dir/opencode"
   printf '%s\n' "$dir"
+}
+
+assert_opencode_log_count() {
+  local log_path expected_count message
+  log_path=$1
+  expected_count=$2
+  message=$3
+  python3 - "$log_path" "$expected_count" "$message" <<'PY'
+import json
+import sys
+
+log_path, expected_count, message = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+with open(log_path, "r", encoding="utf-8") as handle:
+    lines = [line for line in handle.read().splitlines() if line.strip()]
+if len(lines) != expected_count:
+    raise SystemExit(f"{message}\nexpected count: {expected_count}\nactual count:   {len(lines)}")
+for line in lines:
+    json.loads(line)
+PY
+}
+
+assert_opencode_log_invocation_contains() {
+  local log_path index message
+  log_path=$1
+  index=$2
+  message=$3
+  shift 3
+  python3 - "$log_path" "$index" "$message" "$@" <<'PY'
+import json
+import sys
+
+log_path = sys.argv[1]
+index = int(sys.argv[2])
+message = sys.argv[3]
+expected_args = sys.argv[4:]
+
+with open(log_path, "r", encoding="utf-8") as handle:
+    lines = [line for line in handle.read().splitlines() if line.strip()]
+
+if index >= len(lines):
+    raise SystemExit(f"{message}\nmissing invocation index: {index}\nactual count: {len(lines)}")
+
+invocation = json.loads(lines[index])
+for expected in expected_args:
+    if expected not in invocation:
+        raise SystemExit(f"{message}\nmissing arg: {expected}\ninvocation: {invocation}")
+PY
 }
 
 run_in_pty() {
@@ -501,7 +555,7 @@ test_new_without_args_accepts_opencode_suggestion() {
       PATH="$fake_bin:$PATH" \
       WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
       WT_TEST_OPENCODE_LOG="$opencode_log" \
-      run_in_pty $'add a guided onboarding flow\n\n' bash "$ROOT/bin/wt" new
+      run_in_pty $'add a guided onboarding flow\n\nn\n' bash "$ROOT/bin/wt" new
   )
 
   assert_file_exists "${repo}__worktrees/feat-generated-branch" "wt new without args should create the suggested worktree"
@@ -523,7 +577,7 @@ test_new_without_args_allows_editing_suggestion() {
       PATH="$fake_bin:$PATH" \
       WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
       WT_TEST_OPENCODE_LOG="$opencode_log" \
-      run_in_pty $'investigate flaky login test\nfix/login-flake\n' bash "$ROOT/bin/wt" new
+      run_in_pty $'investigate flaky login test\nfix/login-flake\nn\n' bash "$ROOT/bin/wt" new
   )
 
   assert_file_exists "${repo}__worktrees/fix-login-flake" "wt new without args should create the edited branch worktree"
@@ -541,7 +595,7 @@ test_new_without_args_handles_multibyte_backspace_in_goal_prompt() {
       PATH="$fake_bin:$PATH" \
       WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
       WT_TEST_OPENCODE_LOG="$opencode_log" \
-      run_in_pty $'あ\177add a guided onboarding flow\n\n' bash "$ROOT/bin/wt" new
+      run_in_pty $'あ\177add a guided onboarding flow\n\nn\n' bash "$ROOT/bin/wt" new
   )
 
   assert_file_exists "${repo}__worktrees/feat-generated-branch" "wt new without args should still create the suggested worktree after multibyte backspace in the goal prompt"
@@ -562,7 +616,7 @@ test_new_without_args_handles_multibyte_backspace_in_branch_prompt() {
       PATH="$fake_bin:$PATH" \
       WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
       WT_TEST_OPENCODE_LOG="$opencode_log" \
-      run_in_pty $'investigate flaky login test\nあ\177fix/login-flake\n' bash "$ROOT/bin/wt" new
+      run_in_pty $'investigate flaky login test\nあ\177fix/login-flake\nn\n' bash "$ROOT/bin/wt" new
   )
 
   assert_file_exists "${repo}__worktrees/fix-login-flake" "wt new should create the edited branch worktree after multibyte backspace in the branch prompt"
@@ -581,6 +635,104 @@ test_new_without_args_requires_interactive_terminal() {
   assert_contains "$output" "wt new without a branch requires an interactive terminal" "wt new without args should explain the tty requirement"
 }
 
+test_new_without_args_launches_opencode_when_confirmed() {
+  local repo fake_bin opencode_log output expected_worktree
+  repo=$(make_repo)
+  fake_bin=$(make_fake_opencode_bin)
+  opencode_log=$(mktemp)
+
+  output=$(
+    cd "$repo" && \
+      PATH="$fake_bin:$PATH" \
+      WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
+      WT_TEST_OPENCODE_LOG="$opencode_log" \
+      WT_TEST_OPENCODE_STDOUT_MARKER="WT_TEST_OPENCODE_INTERACTIVE" \
+      run_in_pty $'add a guided onboarding flow\n\ny\n' bash "$ROOT/bin/wt" new
+  )
+
+  expected_worktree=$(cd "${repo}__worktrees/feat-generated-branch" && pwd -P)
+
+  assert_file_exists "${repo}__worktrees/feat-generated-branch" "wt new should create the suggested worktree before launching opencode"
+  assert_contains "$output" "WT_TEST_OPENCODE_INTERACTIVE" "wt new should attach the launched opencode session to the terminal"
+  assert_opencode_log_count "$opencode_log" 2 "wt new should call opencode twice when launch is confirmed"
+  assert_opencode_log_invocation_contains "$opencode_log" 1 "wt new should launch opencode in the new worktree with the original goal" "--agent" "Sisyphus (Ultraworker)" "--dir" "$expected_worktree" "--prompt" "add a guided onboarding flow"
+}
+
+test_new_without_args_skips_opencode_when_declined() {
+  local repo fake_bin opencode_log output
+  repo=$(make_repo)
+  fake_bin=$(make_fake_opencode_bin)
+  opencode_log=$(mktemp)
+
+  output=$(
+    cd "$repo" && \
+      PATH="$fake_bin:$PATH" \
+      WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
+      WT_TEST_OPENCODE_LOG="$opencode_log" \
+      run_in_pty $'add a guided onboarding flow\n\nn\n' bash "$ROOT/bin/wt" new
+  )
+
+  assert_file_exists "${repo}__worktrees/feat-generated-branch" "wt new should still create the worktree when opencode launch is declined"
+  assert_contains "$output" "branch: feat/generated-branch" "wt new should still report the created branch when launch is declined"
+  assert_opencode_log_count "$opencode_log" 1 "wt new should only call opencode for branch generation when launch is declined"
+}
+
+test_new_without_args_repompts_for_invalid_launch_confirmation() {
+  local repo fake_bin opencode_log output
+  repo=$(make_repo)
+  fake_bin=$(make_fake_opencode_bin)
+  opencode_log=$(mktemp)
+
+  output=$(
+    cd "$repo" && \
+      PATH="$fake_bin:$PATH" \
+      WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
+      WT_TEST_OPENCODE_LOG="$opencode_log" \
+      run_in_pty $'add a guided onboarding flow\n\nmaybe\nn\n' bash "$ROOT/bin/wt" new
+  )
+
+  assert_contains "$output" "Please answer y or n" "wt new should reprompt for invalid launch confirmation input"
+  assert_opencode_log_count "$opencode_log" 1 "wt new should not launch opencode after invalid input followed by n"
+}
+
+test_new_without_args_launches_opencode_with_original_goal_after_branch_edit() {
+  local repo fake_bin opencode_log expected_worktree
+  repo=$(make_repo)
+  fake_bin=$(make_fake_opencode_bin)
+  opencode_log=$(mktemp)
+
+  (
+    cd "$repo" && \
+      PATH="$fake_bin:$PATH" \
+      WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
+      WT_TEST_OPENCODE_LOG="$opencode_log" \
+      run_in_pty $'investigate flaky login test\nfix/login-flake\ny\n' bash "$ROOT/bin/wt" new >/dev/null
+  )
+
+  expected_worktree=$(cd "${repo}__worktrees/fix-login-flake" && pwd -P)
+
+  assert_file_exists "${repo}__worktrees/fix-login-flake" "wt new should create the edited branch worktree before launching opencode"
+  assert_opencode_log_count "$opencode_log" 2 "wt new should still launch opencode after editing the branch name"
+  assert_opencode_log_invocation_contains "$opencode_log" 1 "wt new should pass the original goal instead of the edited branch name" "--agent" "Sisyphus (Ultraworker)" "--dir" "$expected_worktree" "--prompt" "investigate flaky login test"
+}
+
+test_new_with_explicit_branch_does_not_launch_opencode() {
+  local repo fake_bin opencode_log
+  repo=$(make_repo)
+  fake_bin=$(make_fake_opencode_bin)
+  opencode_log=$(mktemp)
+
+  (
+    cd "$repo" && \
+      PATH="$fake_bin:$PATH" \
+      WT_TEST_OPENCODE_LOG="$opencode_log" \
+      bash "$ROOT/bin/wt" new feature/test >/dev/null
+  )
+
+  assert_file_exists "${repo}__worktrees/feature-test" "wt new with an explicit branch should still create the requested worktree"
+  assert_opencode_log_count "$opencode_log" 0 "wt new with an explicit branch should not invoke opencode"
+}
+
 test_wrapper_new_without_args_changes_directory() {
   local repo expected actual fake_bin
   repo=$(make_repo)
@@ -588,12 +740,33 @@ test_wrapper_new_without_args_changes_directory() {
 
   actual=$(PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
     WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
-    run_in_pty $'add a guided onboarding flow\n\n' \
+    run_in_pty $'add a guided onboarding flow\n\nn\n' \
     bash -lc 'source "$1/shell/wt.bash" && cd "$2" && wt new >/dev/null && pwd -P' bash "$ROOT" "$repo")
 
   expected=$(cd "${repo}__worktrees/feat-generated-branch" && pwd -P)
 
   assert_contains "$actual" "$expected" "sourced wrapper should cd into the AI-selected worktree"
+}
+
+test_wrapper_new_without_args_launches_opencode_and_changes_directory() {
+  local repo expected actual fake_bin opencode_log
+  repo=$(make_repo)
+  fake_bin=$(make_fake_opencode_bin)
+  opencode_log=$(mktemp)
+
+  actual=$(PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
+    WT_TEST_OPENCODE_LOG="$opencode_log" \
+    WT_TEST_OPENCODE_STDOUT_MARKER="WT_TEST_OPENCODE_INTERACTIVE" \
+    run_in_pty $'add a guided onboarding flow\n\ny\n' \
+    bash -lc 'source "$1/shell/wt.bash" && cd "$2" && wt new >/dev/null && pwd -P' bash "$ROOT" "$repo")
+
+  expected=$(cd "${repo}__worktrees/feat-generated-branch" && pwd -P)
+
+  assert_contains "$actual" "$expected" "sourced wrapper should cd into the AI-selected worktree after launching opencode"
+  assert_contains "$actual" "WT_TEST_OPENCODE_INTERACTIVE" "sourced wrapper should keep the opencode session attached to the terminal"
+  assert_opencode_log_count "$opencode_log" 2 "sourced wrapper wt new should launch opencode after branch generation"
+  assert_opencode_log_invocation_contains "$opencode_log" 1 "sourced wrapper wt new should launch opencode in the new worktree" "--agent" "Sisyphus (Ultraworker)" "--dir" "$expected" "--prompt" "add a guided onboarding flow"
 }
 
 test_wrapper_cd_missing_target_keeps_shell_alive() {
@@ -659,12 +832,33 @@ test_zsh_wrapper_new_without_args_changes_directory() {
 
   actual=$(PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
     WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
-    run_in_pty $'add a guided onboarding flow\n\n' \
+    run_in_pty $'add a guided onboarding flow\n\nn\n' \
     zsh -lc 'source "$1/shell/wt.bash" && cd "$2" && wt new >/dev/null && pwd -P' zsh "$ROOT" "$repo")
 
   expected=$(cd "${repo}__worktrees/feat-generated-branch" && pwd -P)
 
   assert_contains "$actual" "$expected" "zsh wrapper should cd into the AI-selected worktree"
+}
+
+test_zsh_wrapper_new_without_args_launches_opencode_and_changes_directory() {
+  local repo expected actual fake_bin opencode_log
+  repo=$(make_repo)
+  fake_bin=$(make_fake_opencode_bin)
+  opencode_log=$(mktemp)
+
+  actual=$(PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
+    WT_TEST_OPENCODE_LOG="$opencode_log" \
+    WT_TEST_OPENCODE_STDOUT_MARKER="WT_TEST_OPENCODE_INTERACTIVE" \
+    run_in_pty $'add a guided onboarding flow\n\ny\n' \
+    zsh -lc 'source "$1/shell/wt.bash" && cd "$2" && wt new >/dev/null && pwd -P' zsh "$ROOT" "$repo")
+
+  expected=$(cd "${repo}__worktrees/feat-generated-branch" && pwd -P)
+
+  assert_contains "$actual" "$expected" "zsh wrapper should cd into the AI-selected worktree after launching opencode"
+  assert_contains "$actual" "WT_TEST_OPENCODE_INTERACTIVE" "zsh wrapper should keep the opencode session attached to the terminal"
+  assert_opencode_log_count "$opencode_log" 2 "zsh wrapper wt new should launch opencode after branch generation"
+  assert_opencode_log_invocation_contains "$opencode_log" 1 "zsh wrapper wt new should launch opencode in the new worktree" "--agent" "Sisyphus (Ultraworker)" "--dir" "$expected" "--prompt" "add a guided onboarding flow"
 }
 
 test_cd_missing_target_fails() {
@@ -1342,11 +1536,18 @@ test_new_without_args_allows_editing_suggestion
 test_new_without_args_handles_multibyte_backspace_in_goal_prompt
 test_new_without_args_handles_multibyte_backspace_in_branch_prompt
 test_new_without_args_requires_interactive_terminal
+test_new_without_args_launches_opencode_when_confirmed
+test_new_without_args_skips_opencode_when_declined
+test_new_without_args_repompts_for_invalid_launch_confirmation
+test_new_without_args_launches_opencode_with_original_goal_after_branch_edit
+test_new_with_explicit_branch_does_not_launch_opencode
 test_wrapper_new_without_args_changes_directory
+test_wrapper_new_without_args_launches_opencode_and_changes_directory
 test_wrapper_cd_missing_target_keeps_shell_alive
 test_zsh_wrapper_cd_changes_directory
 test_zsh_wrapper_new_changes_directory
 test_zsh_wrapper_new_without_args_changes_directory
+test_zsh_wrapper_new_without_args_launches_opencode_and_changes_directory
 test_cd_missing_target_fails
 test_wrapper_rm_without_args_removes_current_worktree_and_branch
 test_wrapper_rm_without_args_refuses_on_main
