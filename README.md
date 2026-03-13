@@ -2,14 +2,17 @@
 
 ## Overview
 
-`wt` is a small local Bash wrapper around `git worktree` for Node.js repositories.
+`wt` is a small local Bash wrapper around `git worktree` that makes creating, navigating, merging, and removing linked worktrees fast and safe.
 
-It keeps the behavior conservative:
-- uses a sibling worktree root at `<repo>__worktrees`
+It works with **any Git repository**. Node.js projects get additional conveniences (lockfile-based package manager detection and automatic dependency installation), but those features are skipped gracefully when no supported lockfile or `packageManager` field is found. You can use `wt` on a Go, Python, Rust, or plain-text repository with no changes.
+
+Core design principles:
+
+- uses a sibling worktree root at `<repo>__worktrees/`
 - keeps the Git branch name separate from the filesystem handle
-- copies a few common local env files only when the source exists and the target is missing
+- copies common local env files only when the source exists and the target is missing
 - installs dependencies only when it can confidently detect the package manager
-- never starts a dev server
+- never starts a dev server or pushes to a remote
 
 ## Install
 
@@ -19,86 +22,174 @@ Add this repository's `bin` directory to your `PATH`:
 export PATH="$(pwd)/bin:$PATH"
 ```
 
-Optional shell helper if you want `cd` behavior in Bash or zsh:
+### Shell wrapper (recommended)
+
+Source the shell helper to get `cd` behavior in Bash or zsh:
 
 ```bash
 source "$(pwd)/shell/wt.bash"
 ```
 
-After sourcing that file, `wt cd <name>` changes into the linked worktree in your current shell,
-and `wt new <branch>` also moves you into the newly created worktree when it succeeds.
-With the sourced wrapper, `wt rm` with no target hops back to the primary worktree before removing the current linked worktree.
+With the sourced wrapper:
+
+- `wt cd <name>` changes into the linked worktree in your current shell
+- `wt new <branch>` and `wt new` (interactive mode) also move you into the new worktree
+- `wt rm` with no target hops back to the primary worktree before removing the current linked worktree
+- `wt merge` moves you back to the primary worktree after a successful merge
+
 Here, "primary" means the repository-root checkout managed by `git worktree`, using whatever branch is currently checked out there.
-The wrapper resolves the bundled `bin/wt` directly, so it does not depend on `command wt` lookup.
-The `wt --help` output still describes the binary itself, while the sourced wrapper adds shell-level `cd` behavior.
+
+The wrapper resolves the bundled `bin/wt` directly, so it does not depend on `command wt` lookup. The `wt --help` output describes the binary itself, while the sourced wrapper adds shell-level `cd` behavior on top.
+
+## Prerequisites
+
+- **Required**: `git`, `bash`
+- **Required for AI features**: [OpenCode](https://github.com/opencode-ai/opencode) (`opencode` on `PATH`)
+- **Required for portless integration**: `portless` on `PATH`, `python3`
+- **Optional**: a supported Node.js package manager (`pnpm`, `npm`, or `bun`) for automatic dependency installation
 
 ## Commands
 
-Create a linked worktree for a branch:
+### `wt new [branch]`
+
+Create a linked worktree for a branch.
 
 ```bash
 wt new feature/test
 ```
 
-Change into a linked worktree by branch or handle:
+When called without a branch argument in an interactive terminal, `wt new` enters an AI-assisted interactive flow:
+
+1. Prompts you to describe what you want to do in the new worktree
+2. Uses OpenCode to suggest a branch name based on your description
+3. Lets you accept or edit the suggested name
+4. Asks whether to launch OpenCode in the new worktree with your original description as the prompt
+
+```bash
+wt new
+# What do you want to do in this worktree? add dark mode support
+# Branch name [feat/dark-mode]: <Enter to accept, or type a different name>
+# Launch opencode with this prompt? (y/n)
+```
+
+### `wt cd <branch-or-handle>`
+
+Print the absolute path for a linked worktree. With the shell wrapper sourced, this also changes your working directory.
 
 ```bash
 wt cd feature/test
 ```
 
-Print the absolute path for a linked worktree:
+### `wt open <branch-or-handle>`
+
+Print the absolute path for a linked worktree (same resolution as `wt cd`, without the shell wrapper's `cd` behavior).
 
 ```bash
 wt open feature/test
 ```
 
-List the primary checkout and linked worktrees:
+### `wt ls`
+
+List the primary checkout and all linked worktrees with their branch, handle, type, and state.
 
 ```bash
 wt ls
 ```
 
-Merge the current linked worktree into the branch currently checked out in the primary worktree and clean up:
+### `wt merge`
+
+Merge the current linked worktree's branch into the branch currently checked out in the primary worktree, then clean up (remove the worktree and delete the branch).
 
 ```bash
 wt merge
 ```
 
-Remove a linked worktree conservatively:
+The merge strategy is:
+
+1. If the primary branch has no new commits, fast-forward directly.
+2. Otherwise, merge the primary branch into the feature branch first (reverse merge) to keep the feature branch safe from conflicts, then fast-forward the primary branch.
+3. If the reverse merge produces conflicts, OpenCode (with the Maat agent) is launched to resolve them automatically. If AI resolution fails, the merge is aborted cleanly and the worktree is left intact.
+
+### `wt rm [--force] [branch-or-handle]`
+
+Remove a linked worktree conservatively.
 
 ```bash
-wt rm
-wt rm feature/test
-wt rm --force
+wt rm                        # remove current worktree (shell wrapper only)
+wt rm feature/test           # remove by branch or handle
+wt rm --force                # remove even if dirty
 wt rm --force feature/test
+```
+
+### `wt init`
+
+Generate or update `.vscode/launch.json` for the current worktree with a Chrome DevTools attach configuration derived from the portless URL.
+
+```bash
+wt init
+```
+
+### `wt b [branch-or-handle]`
+
+Open the current or requested worktree in a Chrome-compatible debug browser, deriving the URL from portless. Reuses an existing debug browser when possible.
+
+```bash
+wt b                   # current worktree
+wt b feature/test      # specific worktree
 ```
 
 ## Safety
 
-`wt` refuses or avoids a few behaviors on purpose:
+`wt` refuses or avoids several behaviors on purpose:
+
 - it must be run from inside the repository you want to manage
 - it will not delete the primary worktree
 - it refuses locked worktrees in v1
 - it refuses dirty worktrees unless you pass `--force`
-- when a removed linked worktree is clean, it also tries `git branch -d`
-- with `wt rm --force`, it also uses `git branch -D`
+- when a removed linked worktree is clean, it also tries `git branch -d`; with `--force`, it uses `git branch -D`
 - it does not symlink `node_modules` or share generated framework directories
-- `wt merge` refuses dirty worktrees and branches with no commits ahead of the branch currently checked out in the primary worktree
-- `wt merge` merges the current primary-worktree branch into the feature branch first to keep that branch safe from conflicts
-- `wt merge` uses AI (OpenCode with the Maat agent) to resolve conflicts when they occur
+- `wt merge` refuses dirty worktrees and branches with no commits ahead
+- `wt merge` merges the primary branch into the feature branch first to keep it safe from conflicts
+- `wt merge` uses AI to resolve conflicts, and aborts cleanly if resolution fails
 - `wt merge` never pushes to a remote
 - real `cd` behavior requires sourcing `shell/wt.bash`, because a subprocess cannot change the parent shell directory
 
-Package manager detection is conservative and lockfile-first:
-- `pnpm-lock.yaml` -> `pnpm install --prefer-offline`
-- `package-lock.json` -> `npm install --prefer-offline`
-- `bun.lock` or `bun.lockb` -> `bun install`
-- otherwise, `package.json` `packageManager` is used when present
+## Package manager detection
 
-If nothing is detected, dependency installation is skipped with an explicit message.
+Detection is conservative and lockfile-first:
 
-## Portless Note
+| Detected file | Install command |
+|---|---|
+| `pnpm-lock.yaml` | `pnpm install --prefer-offline` |
+| `package-lock.json` | `npm install --prefer-offline` |
+| `bun.lock` or `bun.lockb` | `bun install` |
+| `package.json` `packageManager` field | corresponding manager |
+
+If nothing is detected, dependency installation is skipped with an explicit message. This is the expected behavior for non-Node.js repositories.
+
+## Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `WT_MERGE_MODEL` | `opencode-go/glm-5` | OpenCode model used for AI merge conflict resolution |
+| `WT_DEBUG_PORT` | `9222` | Chrome remote debugging port for `wt b` and `wt init` |
+| `WT_DEBUG_USER_DATA_DIR` | `~/.vscode/chrome` | Chrome user data directory for the debug browser |
+| `WT_CHROME_BIN` | auto-detected | Path to a Chrome-compatible browser binary |
+
+## Portless integration
 
 `wt` does not depend on `portless`, and it does not start `portless` or any app process.
 
-If a repository already uses `portless`, a linked worktree should still fit that workflow well because you can start the app yourself inside the new worktree after `wt new ...` finishes.
+When `wt new` creates a worktree in a repository whose `package.json` `scripts.dev` is a portless command, `wt` automatically runs `wt init` to set up the debug browser configuration. The portless URL for the linked worktree is derived from the app name, so each worktree gets a distinct local URL when you start the app yourself.
+
+`wt b` and `wt init` both require portless to be available on `PATH`.
+
+## Testing
+
+Run the smoke test suite:
+
+```bash
+bash tests/smoke.sh
+```
+
+Tests use temporary repositories and fake binaries for external dependencies (OpenCode, portless, Chrome), so they run without network access or real browser instances.
