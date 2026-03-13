@@ -1,0 +1,251 @@
+copy_env_candidates_from_notes() {
+  local source_root target_root copied candidate
+  source_root=$1
+  target_root=$2
+  copied=0
+
+  for candidate in "${ENV_CANDIDATES[@]}"; do
+    if [ -f "$source_root/$candidate" ] && [ ! -e "$target_root/$candidate" ]; then
+      cp "$source_root/$candidate" "$target_root/$candidate"
+      copied=$((copied + 1))
+      warn "Copied $candidate"
+    fi
+  done
+
+  printf '%s\n' "$copied"
+}
+
+run_install_for_worktree() {
+  local target_root package_manager
+  target_root=$1
+  package_manager=$2
+
+  [ -n "$package_manager" ] || return 0
+  command -v "$package_manager" >/dev/null 2>&1 || die "Detected package manager '$package_manager' but it is not available on PATH. The worktree was created at: $target_root"
+
+  case "$package_manager" in
+    pnpm)
+      warn "Installing dependencies with: pnpm install --prefer-offline"
+      (cd "$target_root" && pnpm install --prefer-offline)
+      ;;
+    npm)
+      warn "Installing dependencies with: npm install --prefer-offline"
+      (cd "$target_root" && npm install --prefer-offline)
+      ;;
+    bun)
+      warn "Installing dependencies with: bun install"
+      (cd "$target_root" && bun install)
+      ;;
+    *)
+      die "Unsupported package manager: $package_manager"
+      ;;
+  esac
+}
+
+current_working_tree_is_inside() {
+  local target abs_pwd
+  target=$1
+  abs_pwd=$(pwd -P)
+  case "$abs_pwd" in
+    "$target"|"$target"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+git_dirty_state() {
+  local path status_output
+  path=$1
+  if [ ! -d "$path" ]; then
+    printf '%s\n' "clean"
+    return 0
+  fi
+  status_output=$(git -C "$path" status --porcelain --untracked-files=normal 2>/dev/null || true)
+  if [ -n "$status_output" ]; then
+    printf '%s\n' "dirty"
+  else
+    printf '%s\n' "clean"
+  fi
+}
+
+WT_COUNT=0
+WT_PATHS=()
+WT_BRANCHES=()
+WT_TYPES=()
+WT_HANDLES=()
+WT_STATES=()
+WT_TARGET_INDEX=""
+
+append_worktree_record() {
+  local repo_root worktree_root path branch type handle state dirty annotation
+  repo_root=$1
+  worktree_root=$2
+  path=$3
+  branch=$4
+  annotation=$5
+
+  if [ "$path" = "$repo_root" ]; then
+    type="primary"
+    handle="-"
+  else
+    type="linked"
+    case "$path" in
+      "$worktree_root"/*) handle=$(basename "$path") ;;
+      *) handle=$(basename "$path") ;;
+    esac
+  fi
+
+  dirty=$(git_dirty_state "$path")
+  state="$dirty"
+
+  if [ ! -d "$path" ]; then
+    state="$state,missing"
+  fi
+  case ",$annotation," in
+    *,locked,*) state="$state,locked" ;;
+  esac
+  case ",$annotation," in
+    *,prunable,*) state="$state,prunable" ;;
+  esac
+
+  WT_PATHS[$WT_COUNT]="$path"
+  WT_BRANCHES[$WT_COUNT]="$branch"
+  WT_TYPES[$WT_COUNT]="$type"
+  WT_HANDLES[$WT_COUNT]="$handle"
+  WT_STATES[$WT_COUNT]="$state"
+  WT_COUNT=$((WT_COUNT + 1))
+}
+
+list_worktrees() {
+  local repo_root worktree_root entry path branch annotation token key value
+  repo_root=$(get_main_repo_root)
+  worktree_root=$(get_worktree_root)
+
+  WT_COUNT=0
+  WT_PATHS=()
+  WT_BRANCHES=()
+  WT_TYPES=()
+  WT_HANDLES=()
+  WT_STATES=()
+
+  path=""
+  branch="HEAD"
+  annotation=""
+
+  while IFS= read -r -d '' entry; do
+    if [ -z "$entry" ]; then
+      if [ -n "$path" ]; then
+        append_worktree_record "$repo_root" "$worktree_root" "$path" "$branch" "$annotation"
+      fi
+      path=""
+      branch="HEAD"
+      annotation=""
+      continue
+    fi
+
+    token=${entry%% *}
+    if [ "$token" = "$entry" ]; then
+      key=$entry
+      value=""
+    else
+      key=$token
+      value=${entry#* }
+    fi
+
+    case "$key" in
+      worktree) path=$value ;;
+      branch) branch=${value#refs/heads/} ;;
+      detached) branch="HEAD" ;;
+      locked)
+        if [ -n "$annotation" ]; then
+          annotation="$annotation,locked"
+        else
+          annotation="locked"
+        fi
+        ;;
+      prunable)
+        if [ -n "$annotation" ]; then
+          annotation="$annotation,prunable"
+        else
+          annotation="prunable"
+        fi
+        ;;
+    esac
+  done < <(git -C "$repo_root" worktree list --porcelain -z)
+
+  if [ -n "$path" ]; then
+    append_worktree_record "$repo_root" "$worktree_root" "$path" "$branch" "$annotation"
+  fi
+}
+
+ensure_unique_handle() {
+  local requested_handle i
+  requested_handle=$1
+  list_worktrees
+  i=0
+  while [ $i -lt $WT_COUNT ]; do
+    if [ "${WT_TYPES[$i]}" = "linked" ] && [ "${WT_HANDLES[$i]}" = "$requested_handle" ]; then
+      die "Handle already exists: $requested_handle (${WT_PATHS[$i]})"
+    fi
+    i=$((i + 1))
+  done
+}
+
+resolve_worktree_target() {
+  local query handle_match_index branch_match_index i
+  query=${1-}
+  [ -n "$query" ] || die "A branch or handle is required"
+  list_worktrees
+
+  WT_TARGET_INDEX=""
+
+  handle_match_index=""
+  branch_match_index=""
+  i=0
+  while [ $i -lt $WT_COUNT ]; do
+    if [ "${WT_TYPES[$i]}" = "linked" ] && [ "${WT_HANDLES[$i]}" = "$query" ] && [ -z "$handle_match_index" ]; then
+      handle_match_index=$i
+    fi
+    if [ "${WT_BRANCHES[$i]}" = "$query" ] && [ -z "$branch_match_index" ]; then
+      branch_match_index=$i
+    fi
+    i=$((i + 1))
+  done
+
+  if [ -n "$handle_match_index" ] && [ -n "$branch_match_index" ] && [ "$handle_match_index" != "$branch_match_index" ]; then
+    die "Ambiguous target '$query': handle -> ${WT_PATHS[$handle_match_index]}, branch -> ${WT_PATHS[$branch_match_index]}"
+  fi
+  if [ -n "$handle_match_index" ]; then
+    WT_TARGET_INDEX=$handle_match_index
+    return 0
+  fi
+  if [ -n "$branch_match_index" ]; then
+    WT_TARGET_INDEX=$branch_match_index
+    return 0
+  fi
+
+  die "No worktree matched branch or handle: $query"
+}
+
+format_table_row() {
+  local c1w c2w c3w c4w c1 c2 c3 c4 c5
+  c1w=$1
+  c2w=$2
+  c3w=$3
+  c4w=$4
+  c1=$5
+  c2=$6
+  c3=$7
+  c4=$8
+  c5=$9
+  printf "%-${c1w}s  %-${c2w}s  %-${c3w}s  %-${c4w}s  %s\n" "$c1" "$c2" "$c3" "$c4" "$c5"
+}
+
+print_worktree_target_path() {
+  local target index
+  [ $# -eq 1 ] || die "Usage: wt open <branch-or-handle>"
+  target=$1
+  require_git_repo
+  resolve_worktree_target "$target"
+  index=$WT_TARGET_INDEX
+  printf '%s\n' "${WT_PATHS[$index]}"
+}

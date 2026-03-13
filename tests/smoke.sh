@@ -673,7 +673,7 @@ test_new_without_args_keeps_goal_prompt_visible_after_excess_backspace() {
       PATH="$fake_bin:$PATH" \
       WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
       WT_TEST_OPENCODE_LOG="$opencode_log" \
-      run_in_pty $'abc\177\177\177\177\177add a guided onboarding flow\n\n' bash "$ROOT/bin/wt" new
+      run_in_pty $'abc\177\177\177\177\177add a guided onboarding flow\n\nn\n' bash "$ROOT/bin/wt" new
   )
   rendered_output=$(render_terminal_output "$output")
 
@@ -711,7 +711,7 @@ test_new_without_args_keeps_branch_prompt_visible_after_excess_backspace() {
       PATH="$fake_bin:$PATH" \
       WT_TEST_OPENCODE_BRANCH="feat/generated-branch" \
       WT_TEST_OPENCODE_LOG="$opencode_log" \
-      run_in_pty $'investigate flaky login test\nabc\177\177\177\177\177fix/login-flake\n' bash "$ROOT/bin/wt" new
+      run_in_pty $'investigate flaky login test\nabc\177\177\177\177\177fix/login-flake\nn\n' bash "$ROOT/bin/wt" new
   )
   rendered_output=$(render_terminal_output "$output")
 

@@ -3,20 +3,37 @@
 ## Project structure
 
 ```
-bin/wt           # Main CLI — single Bash script, all logic lives here
-shell/wt.bash    # Shell wrapper for cd behavior (bash + zsh)
-tests/smoke.sh   # End-to-end test suite with fake binaries
-README.md        # User-facing documentation
-AGENTS.md        # This file — internal design notes for AI agents
+bin/wt             # Main CLI entrypoint — sources internal Bash modules, then dispatches commands
+lib/wt-core.sh     # Shared constants and foundational helpers
+lib/wt-portless.sh # Portless parsing and URL derivation helpers
+lib/wt-debug.sh    # VS Code launch.json + Chrome DevTools helpers
+lib/wt-worktree.sh # Worktree inventory, target resolution, install/env helpers
+lib/wt-new.sh      # Interactive wt new flow and OpenCode branch suggestion helpers
+lib/wt-commands.sh # cmd_* handlers plus merge/sync helpers
+shell/wt.bash      # Shell wrapper for cd behavior (bash + zsh)
+tests/smoke.sh     # End-to-end test suite with fake binaries
+README.md          # User-facing documentation
+AGENTS.md          # This file — internal design notes for AI agents
 ```
 
-There is no build step, no transpilation, and no package.json for this repository itself. The `bin/wt` script is both source and executable.
+There is no build step, no transpilation, and no package.json for this repository itself. `bin/wt` remains the executable entrypoint, but the implementation is split across sourced Bash modules under `lib/`.
 
 ## Architecture decisions not obvious from source
 
-### Why a single Bash file
+### Why sourced Bash modules
 
-All commands live in `bin/wt` as functions (`cmd_new`, `cmd_rm`, `cmd_merge`, `cmd_sync`, etc.). This is intentional: `wt` is distributed by adding `bin/` to `PATH`, so a single self-contained script avoids library resolution issues. Helper functions like `normalize_handle`, `detect_package_manager`, and `list_worktrees` are defined before the command functions that use them.
+`wt` is still distributed by adding `bin/` to `PATH`, but `bin/wt` is now a thin entrypoint that resolves its own location, sources companion modules from `lib/`, and then dispatches to `cmd_*` functions. This keeps the runtime model simple while reducing the cognitive load of a single 1500-line script.
+
+Modules are grouped by responsibility:
+
+- `lib/wt-core.sh` for shared constants and foundational helpers
+- `lib/wt-portless.sh` for portless parsing and URL derivation
+- `lib/wt-debug.sh` for launch.json and debug-browser integration
+- `lib/wt-worktree.sh` for worktree inventory, target resolution, and setup helpers
+- `lib/wt-new.sh` for interactive `wt new` / OpenCode branch suggestion logic
+- `lib/wt-commands.sh` for `cmd_*` handlers and merge/sync helpers
+
+The CLI and wrapper contracts are intentionally unchanged: `shell/wt.bash` still shells out to `bin/wt`, and parseable stdout fields like `worktree_path: ...` remain stable.
 
 ### Embedded Python helpers
 
