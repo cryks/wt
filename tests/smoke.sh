@@ -55,11 +55,12 @@ assert_file_missing() {
 }
 
 make_repo() {
-  local base repo
+  local base repo primary_branch
   base=$(mktemp -d)
   repo="$base/repo with spaces"
+  primary_branch=${1:-main}
   mkdir -p "$repo"
-  git -C "$repo" init -b main >/dev/null
+  git -C "$repo" init -b "$primary_branch" >/dev/null
   git -C "$repo" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false commit --allow-empty -m init >/dev/null
   printf '%s\n' "$repo"
 }
@@ -252,7 +253,7 @@ PY
   git add "$file"
 done
 
-git -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false merge --continue --no-edit
+GIT_EDITOR=: git -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false merge --continue
 EOF
   chmod +x "$dir/opencode"
   printf '%s\n' "$dir"
@@ -657,7 +658,7 @@ fi
 EOF
 )
 
-  assert_contains "$output" "cwd=$expected_repo" "wrapper wt rm without args should move back to the main worktree"
+  assert_contains "$output" "cwd=$expected_repo" "wrapper wt rm without args should move back to the primary worktree"
   assert_contains "$output" "branch=no" "wrapper wt rm without args should delete the clean branch"
   assert_file_missing "$worktree" "wrapper wt rm without args should remove the current worktree"
 }
@@ -685,9 +686,9 @@ EOF
 
   rm -f "$main_out" "$main_err"
 
-  assert_contains "$output" "status=failure" "wt rm without args should fail on the main worktree"
-  assert_contains "$output" "cwd=$expected_repo" "failed wt rm on main should keep the shell in place"
-  assert_contains "$output" "Refusing to remove the main worktree" "wt rm without args should explain the main-worktree refusal"
+  assert_contains "$output" "status=failure" "wt rm without args should fail on the primary worktree"
+  assert_contains "$output" "cwd=$expected_repo" "failed wt rm on the primary worktree should keep the shell in place"
+  assert_contains "$output" "Refusing to remove the primary worktree" "wt rm without args should explain the primary-worktree refusal"
 }
 
 test_wrapper_rm_without_args_dirty_keeps_current_directory() {
@@ -744,9 +745,35 @@ fi
 EOF
 )
 
-  assert_contains "$output" "cwd=$expected_repo" "wrapper wt rm --force without args should move back to the main worktree"
+  assert_contains "$output" "cwd=$expected_repo" "wrapper wt rm --force without args should move back to the primary worktree"
   assert_contains "$output" "branch=no" "wrapper wt rm --force without args should force delete the branch"
   assert_file_missing "$worktree" "wrapper wt rm --force without args should remove the dirty worktree"
+}
+
+test_wrapper_rm_without_args_works_from_non_main_primary_branch() {
+  local repo worktree output expected_repo
+  repo=$(make_repo trunk)
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+  expected_repo=$(cd "$repo" && pwd -P)
+
+  output=$(PATH="/usr/bin:/bin:/usr/sbin:/sbin" bash <<EOF
+set -euo pipefail
+source "$ROOT/shell/wt.bash"
+cd "$worktree"
+wt rm >/dev/null
+printf 'cwd=%s\n' "\$(pwd -P)"
+if git -C "$repo" show-ref --verify --quiet refs/heads/feature/test; then
+  printf 'branch=yes\n'
+else
+  printf 'branch=no\n'
+fi
+EOF
+)
+
+  assert_contains "$output" "cwd=$expected_repo" "wrapper wt rm without args should return to the primary worktree even when the branch is not named main"
+  assert_contains "$output" "branch=no" "wrapper wt rm without args should delete the clean branch on a non-main primary branch"
+  assert_file_missing "$worktree" "wrapper wt rm without args should remove the current worktree on a non-main primary branch"
 }
 
 test_rm_explicit_target_deletes_clean_branch() {
@@ -790,6 +817,18 @@ test_ls_shows_branch_first() {
   output=$(cd "$repo" && bash "$ROOT/bin/wt" ls)
   header=$(printf '%s\n' "$output" | /usr/bin/awk 'NR==1 { print $1 " " $2 " " $3 " " $4 }')
   assert_eq "BRANCH HANDLE TYPE STATE" "$header" "wt ls should show branch first"
+}
+
+test_ls_marks_primary_worktree_as_primary() {
+  local repo output primary_branch primary_row
+  repo=$(make_repo trunk)
+  primary_branch=$(repo_primary_branch "$repo")
+
+  output=$(cd "$repo" && bash "$ROOT/bin/wt" ls)
+  primary_row=$(printf '%s\n' "$output" | /usr/bin/awk 'NR==2 { print }')
+
+  assert_contains "$primary_row" "$primary_branch" "wt ls should show the primary branch in the first row"
+  assert_contains "$primary_row" "primary" "wt ls should mark the primary checkout as primary"
 }
 
 test_init_creates_launch_json_for_explicit_portless_name() {
@@ -971,6 +1010,23 @@ configure_repo_for_merge() {
   git -C "$repo" config commit.gpgsign "false"
 }
 
+repo_primary_branch() {
+  local repo
+  repo=$1
+  git -C "$repo" branch --show-current
+}
+
+repo_dirty_state() {
+  local repo status_output
+  repo=$1
+  status_output=$(git -C "$repo" status --porcelain --untracked-files=normal 2>/dev/null || true)
+  if [ -n "$status_output" ]; then
+    printf '%s\n' "dirty"
+  else
+    printf '%s\n' "clean"
+  fi
+}
+
 test_merge_fast_forward() {
   local repo worktree output expected_repo
   repo=$(make_repo)
@@ -996,14 +1052,15 @@ EOF
   assert_contains "$output" "merge: fast-forward" "wt merge should report fast-forward"
   assert_contains "$output" "removed_worktree:" "wt merge should remove the worktree"
   assert_contains "$output" "removed_branch: feature/test" "wt merge should delete the branch"
-  assert_contains "$output" "cwd=$expected_repo" "wt merge wrapper should cd to main"
+  assert_contains "$output" "cwd=$expected_repo" "wt merge wrapper should cd to the primary worktree"
   assert_file_missing "$worktree" "wt merge should remove the worktree directory"
 }
 
 test_merge_non_ff_clean() {
-  local repo worktree output expected_repo
+  local repo worktree output expected_repo primary_branch
   repo=$(make_repo)
   configure_repo_for_merge "$repo"
+  primary_branch=$(repo_primary_branch "$repo")
   worktree="${repo}__worktrees/feature-test"
   git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
 
@@ -1011,8 +1068,8 @@ test_merge_non_ff_clean() {
   git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false add feature.txt >/dev/null
   git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false commit -m "add feature" >/dev/null
 
-  printf 'main change\n' >"$repo/main.txt"
-  commit_repo_state "$repo" "add main change"
+  printf 'primary change\n' >"$repo/primary.txt"
+  commit_repo_state "$repo" "add primary change"
 
   expected_repo=$(cd "$repo" && pwd -P)
 
@@ -1026,13 +1083,13 @@ EOF
 )
 
   assert_contains "$output" "merge: resolved without conflicts" "wt merge should report clean reverse merge"
-  assert_contains "$output" "merge: main updated" "wt merge should report main updated"
+  assert_contains "$output" "merge: primary updated" "wt merge should report primary updated"
   assert_contains "$output" "removed_worktree:" "wt merge should remove the worktree"
   assert_contains "$output" "removed_branch: feature/test" "wt merge should delete the branch"
-  assert_contains "$output" "cwd=$expected_repo" "wt merge wrapper should cd to main"
+  assert_contains "$output" "cwd=$expected_repo" "wt merge wrapper should cd to the primary worktree"
   assert_file_missing "$worktree" "wt merge should remove the worktree directory"
-  assert_file_exists "$repo/feature.txt" "main should contain the feature file after merge"
-  assert_file_exists "$repo/main.txt" "main should retain its own file after merge"
+  assert_file_exists "$repo/feature.txt" "the primary branch should contain the feature file after merge"
+  assert_file_exists "$repo/primary.txt" "the primary branch should retain its own file after merge"
 }
 
 test_merge_refuses_dirty_worktree() {
@@ -1050,8 +1107,9 @@ test_merge_refuses_dirty_worktree() {
 }
 
 test_merge_refuses_no_commits_ahead() {
-  local repo worktree output
+  local repo worktree output primary_branch
   repo=$(make_repo)
+  primary_branch=$(repo_primary_branch "$repo")
   worktree="${repo}__worktrees/feature-test"
   git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
 
@@ -1059,22 +1117,76 @@ test_merge_refuses_no_commits_ahead() {
     fail "wt merge should refuse when no commits ahead"
   fi
 
-  assert_contains "$output" "Cannot merge: no commits ahead of main" "wt merge should explain the no-commits refusal"
+  assert_contains "$output" "Cannot merge: no commits ahead of $primary_branch" "wt merge should explain the no-commits refusal"
 }
 
-test_merge_refuses_main_worktree() {
+test_merge_refuses_primary_worktree() {
   local repo output
   repo=$(make_repo)
 
   if output=$(cd "$repo" && bash "$ROOT/bin/wt" merge 2>&1); then
-    fail "wt merge should refuse on the main worktree"
+    fail "wt merge should refuse on the primary worktree"
   fi
 
-  assert_contains "$output" "Cannot merge: already on the main worktree" "wt merge should explain the main-worktree refusal"
+  assert_contains "$output" "Cannot merge: already on the primary worktree" "wt merge should explain the primary-worktree refusal"
+}
+
+test_merge_uses_current_primary_branch_when_primary_switches() {
+  local repo worktree output expected_repo primary_branch
+  repo=$(make_repo trunk)
+  configure_repo_for_merge "$repo"
+  git -C "$repo" switch -c release/1.0 >/dev/null
+  primary_branch=$(repo_primary_branch "$repo")
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  printf 'feature\n' >"$worktree/feature.txt"
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false add feature.txt >/dev/null
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false commit -m "add feature" >/dev/null
+
+  printf 'release change\n' >"$repo/release.txt"
+  commit_repo_state "$repo" "add release change"
+
+  expected_repo=$(cd "$repo" && pwd -P)
+
+  output=$(PATH="/usr/bin:/bin:/usr/sbin:/sbin" bash <<EOF
+set -euo pipefail
+source "$ROOT/shell/wt.bash"
+cd "$worktree"
+wt merge
+printf 'cwd=%s\n' "\$(pwd -P)"
+EOF
+)
+
+  assert_eq "release/1.0" "$primary_branch" "test setup should switch the primary worktree to a different branch"
+  assert_contains "$output" "merge: primary updated" "wt merge should update the currently checked out primary branch"
+  assert_contains "$output" "cwd=$expected_repo" "wt merge wrapper should return to the current primary worktree"
+  assert_file_exists "$repo/feature.txt" "the switched primary branch should receive the feature commit"
+  assert_file_exists "$repo/release.txt" "the switched primary branch should keep its own commit"
+}
+
+test_merge_refuses_when_primary_worktree_is_detached_head() {
+  local repo worktree output
+  repo=$(make_repo)
+  configure_repo_for_merge "$repo"
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  printf 'feature\n' >"$worktree/feature.txt"
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false add feature.txt >/dev/null
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false commit -m "add feature" >/dev/null
+
+  git -C "$repo" checkout --detach >/dev/null 2>&1
+
+  if output=$(cd "$worktree" && bash "$ROOT/bin/wt" merge 2>&1); then
+    fail "wt merge should refuse when the primary worktree is detached"
+  fi
+
+  assert_contains "$output" "Unable to determine the primary branch" "wt merge should explain why detached primary HEAD is unsupported"
 }
 
 test_merge_with_conflicts_ai_resolves() {
-  local repo worktree fake_bin output expected_repo
+  local repo worktree fake_bin output
   repo=$(make_repo)
   configure_repo_for_merge "$repo"
 
@@ -1088,11 +1200,10 @@ test_merge_with_conflicts_ai_resolves() {
   git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false add shared.txt >/dev/null
   git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false commit -m "feature change to shared" >/dev/null
 
-  printf 'main change\n' >"$repo/shared.txt"
-  commit_repo_state "$repo" "main change to shared"
+  printf 'primary change\n' >"$repo/shared.txt"
+  commit_repo_state "$repo" "primary change to shared"
 
   fake_bin=$(make_fake_opencode_merge_bin)
-  expected_repo=$(cd "$repo" && pwd -P)
 
   output=$(cd "$worktree" && PATH="$fake_bin:$PATH" bash "$ROOT/bin/wt" merge 2>&1)
 
@@ -1101,7 +1212,7 @@ test_merge_with_conflicts_ai_resolves() {
   assert_contains "$output" "removed_worktree:" "wt merge should remove the worktree after AI resolution"
   assert_contains "$output" "removed_branch: feature/test" "wt merge should delete the branch after AI resolution"
   assert_file_missing "$worktree" "wt merge should remove the worktree directory after AI resolution"
-  assert_file_exists "$repo/shared.txt" "main should contain the shared file after AI merge"
+  assert_file_exists "$repo/shared.txt" "the primary branch should contain the shared file after AI merge"
 }
 
 test_merge_with_conflicts_ai_fails() {
@@ -1119,8 +1230,8 @@ test_merge_with_conflicts_ai_fails() {
   git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false add shared.txt >/dev/null
   git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false commit -m "feature change to shared" >/dev/null
 
-  printf 'main change\n' >"$repo/shared.txt"
-  commit_repo_state "$repo" "main change to shared"
+  printf 'primary change\n' >"$repo/shared.txt"
+  commit_repo_state "$repo" "primary change to shared"
 
   fake_bin=$(make_fake_opencode_noop_bin)
 
@@ -1133,8 +1244,43 @@ test_merge_with_conflicts_ai_fails() {
   assert_file_exists "$worktree" "wt merge should keep the worktree when AI fails"
 
   local worktree_state
-  worktree_state=$(git_dirty_state "$worktree")
+  worktree_state=$(repo_dirty_state "$worktree")
   assert_eq "clean" "$worktree_state" "wt merge should abort the merge cleanly when AI fails"
+}
+
+test_merge_non_ff_clean_with_non_main_primary_branch() {
+  local repo worktree output expected_repo primary_branch
+  repo=$(make_repo trunk)
+  configure_repo_for_merge "$repo"
+  primary_branch=$(repo_primary_branch "$repo")
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  printf 'feature\n' >"$worktree/feature.txt"
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false add feature.txt >/dev/null
+  git -C "$worktree" -c user.name=wt -c user.email=wt@example.com -c commit.gpgsign=false commit -m "add feature" >/dev/null
+
+  printf 'primary change\n' >"$repo/primary.txt"
+  commit_repo_state "$repo" "add primary change"
+
+  expected_repo=$(cd "$repo" && pwd -P)
+
+  output=$(PATH="/usr/bin:/bin:/usr/sbin:/sbin" bash <<EOF
+set -euo pipefail
+source "$ROOT/shell/wt.bash"
+cd "$worktree"
+wt merge
+printf 'cwd=%s\n' "\$(pwd -P)"
+EOF
+)
+
+  assert_eq "trunk" "$primary_branch" "test setup should use a non-main primary branch"
+  assert_contains "$output" "merge: resolved without conflicts" "wt merge should report clean reverse merge on a non-main primary branch"
+  assert_contains "$output" "merge: primary updated" "wt merge should report primary updated on a non-main primary branch"
+  assert_contains "$output" "cwd=$expected_repo" "wt merge wrapper should cd to the non-main primary worktree"
+  assert_file_missing "$worktree" "wt merge should remove the worktree directory on a non-main primary branch"
+  assert_file_exists "$repo/feature.txt" "the non-main primary branch should contain the feature file after merge"
+  assert_file_exists "$repo/primary.txt" "the non-main primary branch should retain its own file after merge"
 }
 
 test_new_runs_init_for_portless_worktree() {
@@ -1165,9 +1311,11 @@ test_wrapper_rm_without_args_removes_current_worktree_and_branch
 test_wrapper_rm_without_args_refuses_on_main
 test_wrapper_rm_without_args_dirty_keeps_current_directory
 test_wrapper_rm_force_without_args_removes_dirty_current_worktree_and_branch
+test_wrapper_rm_without_args_works_from_non_main_primary_branch
 test_rm_explicit_target_deletes_clean_branch
 test_rm_explicit_target_leaves_unmerged_branch_when_branch_delete_fails
 test_ls_shows_branch_first
+test_ls_marks_primary_worktree_as_primary
 test_init_creates_launch_json_for_explicit_portless_name
 test_init_preserves_unrelated_configs_and_removes_browser_launch
 test_init_derives_name_for_portless_run
@@ -1179,8 +1327,11 @@ test_merge_fast_forward
 test_merge_non_ff_clean
 test_merge_refuses_dirty_worktree
 test_merge_refuses_no_commits_ahead
-test_merge_refuses_main_worktree
+test_merge_refuses_primary_worktree
+test_merge_uses_current_primary_branch_when_primary_switches
+test_merge_refuses_when_primary_worktree_is_detached_head
 test_merge_with_conflicts_ai_resolves
 test_merge_with_conflicts_ai_fails
+test_merge_non_ff_clean_with_non_main_primary_branch
 
 printf 'smoke tests passed\n'

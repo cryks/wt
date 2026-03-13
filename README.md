@@ -27,7 +27,8 @@ source "/Users/rbr/work/wt/shell/wt.bash"
 
 After sourcing that file, `wt cd <name>` changes into the linked worktree in your current shell,
 and `wt new <branch>` also moves you into the newly created worktree when it succeeds.
-With the sourced wrapper, `wt rm` with no target hops back to `main` before removing the current linked worktree.
+With the sourced wrapper, `wt rm` with no target hops back to the primary worktree before removing the current linked worktree.
+Here, "primary" means the repository-root checkout managed by `git worktree`, using whatever branch is currently checked out there.
 The wrapper resolves the bundled `bin/wt` directly, so it does not depend on `command wt` lookup.
 The `wt --help` output still describes the binary itself, while the sourced wrapper adds shell-level `cd` behavior.
 
@@ -51,13 +52,13 @@ Print the absolute path for a linked worktree:
 wt open feature/test
 ```
 
-List the main checkout and linked worktrees:
+List the primary checkout and linked worktrees:
 
 ```bash
 wt ls
 ```
 
-Merge the current linked worktree into main and clean up:
+Merge the current linked worktree into the branch currently checked out in the primary worktree and clean up:
 
 ```bash
 wt merge
@@ -76,14 +77,14 @@ wt rm --force feature/test
 
 `wt` refuses or avoids a few behaviors on purpose:
 - it must be run from inside the repository you want to manage
-- it will not delete the main worktree
+- it will not delete the primary worktree
 - it refuses locked worktrees in v1
 - it refuses dirty worktrees unless you pass `--force`
 - when a removed linked worktree is clean, it also tries `git branch -d`
 - with `wt rm --force`, it also uses `git branch -D`
 - it does not symlink `node_modules` or share generated framework directories
-- `wt merge` refuses dirty worktrees and branches with no commits ahead of main
-- `wt merge` merges main into the feature branch first to keep main safe from conflicts
+- `wt merge` refuses dirty worktrees and branches with no commits ahead of the branch currently checked out in the primary worktree
+- `wt merge` merges the current primary-worktree branch into the feature branch first to keep that branch safe from conflicts
 - `wt merge` uses AI (OpenCode with the Maat agent) to resolve conflicts when they occur
 - `wt merge` never pushes to a remote
 - real `cd` behavior requires sourcing `shell/wt.bash`, because a subprocess cannot change the parent shell directory

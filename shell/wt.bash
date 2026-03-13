@@ -136,12 +136,7 @@ wt() {
         rm_target=$(basename "$current_root")
       fi
 
-      if target_path=$("$wt_bin" cd main); then
-        :
-      else
-        return $?
-      fi
-      builtin cd -- "$target_path"
+      builtin cd -- "$main_root"
       if [ $rm_force -eq 1 ]; then
         "$wt_bin" rm --force "$rm_target"
       else

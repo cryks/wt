@@ -41,9 +41,9 @@ Commands:
   b      Open the current or requested worktree in the debug browser
   cd     Print the absolute path for a linked worktree
   open   Print the absolute path for a linked worktree
-  merge  Merge the current linked worktree into main and clean up
+  merge  Merge the current linked worktree into the primary branch and clean up
   rm     Remove a linked worktree conservatively
-  ls     List the main checkout and linked worktrees
+  ls     List the primary checkout and linked worktrees
 
 Notes:
   - Run wt from inside the repository you want to manage.
@@ -72,6 +72,14 @@ get_main_repo_root() {
   common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || git rev-parse --git-common-dir)
   common_dir=$(cd "$common_dir" && pwd -P)
   dirname "$common_dir"
+}
+
+get_primary_branch() {
+  local repo_root branch
+  repo_root=${1:-$(get_main_repo_root)}
+  branch=$(git -C "$repo_root" branch --show-current 2>/dev/null || true)
+  [ -n "$branch" ] || die "Unable to determine the primary branch from: $repo_root (the primary worktree may be on a detached HEAD)"
+  printf '%s\n' "$branch"
 }
 
 get_repo_name() {
@@ -742,7 +750,7 @@ append_worktree_record() {
   annotation=$5
 
   if [ "$path" = "$repo_root" ]; then
-    type="main"
+    type="primary"
     handle="-"
   else
     type="linked"
@@ -1223,7 +1231,7 @@ cmd_rm() {
   target_type=${WT_TYPES[$index]}
   target_branch=${WT_BRANCHES[$index]}
 
-  [ "$target_type" != "main" ] || die "Refusing to remove the main worktree"
+  [ "$target_type" != "primary" ] || die "Refusing to remove the primary worktree"
   if [ -n "$target" ]; then
     current_working_tree_is_inside "$target_path" && die "Refusing to remove a worktree from inside that worktree: $target_path"
   fi
@@ -1280,12 +1288,13 @@ merge_head_exists() {
   [ -f "$git_dir/MERGE_HEAD" ]
 }
 
-merge_feature_with_main() {
-  local feature_root feature_branch
+merge_feature_with_primary() {
+  local feature_root feature_branch primary_branch
   feature_root=$1
   feature_branch=$2
+  primary_branch=$3
 
-  if git -C "$feature_root" merge main >/dev/null 2>&1; then
+  if git -C "$feature_root" merge "$primary_branch" >/dev/null 2>&1; then
     note "merge: resolved without conflicts"
     return 0
   fi
@@ -1298,7 +1307,7 @@ merge_feature_with_main() {
   require_command opencode
 
   opencode --agent "Maat" --model "$WT_MERGE_MODEL" --dir "$feature_root" \
-    --prompt "Merge conflicts need to be resolved. Branch '$feature_branch' is merging 'main'. Examine the conflicts, resolve them, stage the files, and run 'git merge --continue --no-edit'." \
+    --prompt "Merge conflicts need to be resolved. Branch '$feature_branch' is merging '$primary_branch'. Examine the conflicts, resolve them, stage the files, and run 'git merge --continue --no-edit'." \
     || true
 
   if merge_head_exists "$feature_root"; then
@@ -1328,13 +1337,14 @@ merge_cleanup() {
 }
 
 cmd_merge() {
-  local repo_root main_root feature_root feature_branch unique_commits i index
+  local repo_root main_root primary_branch feature_root feature_branch unique_commits i index
 
   [ $# -eq 0 ] || die "Usage: wt merge"
   require_git_repo
 
   repo_root=$(get_repo_root)
   main_root=$(get_main_repo_root)
+  primary_branch=$(get_primary_branch "$main_root")
 
   list_worktrees
   index=""
@@ -1351,21 +1361,21 @@ cmd_merge() {
   feature_root="${WT_PATHS[$index]}"
   feature_branch="${WT_BRANCHES[$index]}"
 
-  [ "${WT_TYPES[$index]}" != "main" ] || die "Cannot merge: already on the main worktree"
+  [ "${WT_TYPES[$index]}" != "primary" ] || die "Cannot merge: already on the primary worktree"
   [ "$feature_branch" != "HEAD" ] || die "Cannot merge: current worktree has a detached HEAD"
   [ "$(git_dirty_state "$feature_root")" = "clean" ] || die "Cannot merge: worktree has uncommitted changes"
 
-  unique_commits=$(git -C "$feature_root" log "main..$feature_branch" --oneline 2>/dev/null || true)
-  [ -n "$unique_commits" ] || die "Cannot merge: no commits ahead of main"
+  unique_commits=$(git -C "$feature_root" log "$primary_branch..$feature_branch" --oneline 2>/dev/null || true)
+  [ -n "$unique_commits" ] || die "Cannot merge: no commits ahead of $primary_branch"
 
   if git -C "$main_root" merge --ff-only "$feature_branch" >/dev/null 2>&1; then
     note "merge: fast-forward"
   else
-    merge_feature_with_main "$feature_root" "$feature_branch"
+    merge_feature_with_primary "$feature_root" "$feature_branch" "$primary_branch"
 
     git -C "$main_root" merge --ff-only "$feature_branch" >/dev/null 2>&1 \
       || die "Unexpected: fast-forward failed after reverse merge"
-    note "merge: main updated"
+    note "merge: primary updated"
   fi
 
   merge_cleanup "$main_root" "$feature_root" "$feature_branch"
