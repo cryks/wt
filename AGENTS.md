@@ -111,7 +111,7 @@ These are used in `bin/wt` and can be overridden:
 |---|---|---|
 | `WT_BRANCH_NAME_MODEL` | `opencode-go/kimi-k2.5` | Model for AI branch name suggestion |
 | `WT_MERGE_MODEL` | `opencode-go/glm-5` | Model for AI merge conflict resolution |
-| `WT_NEW_WORKTREE_AGENT` | `Sisyphus (Ultraworker)` | OpenCode agent for new worktree autostart |
+| `WT_NEW_WORKTREE_AGENT` | `Build` | OpenCode agent for new worktree autostart |
 | `WT_DEBUG_PORT` / `WT_DEBUG_PORT_DEFAULT` | `9222` | Chrome remote debugging port |
 | `WT_DEBUG_USER_DATA_DIR` | `~/.vscode/chrome` | Chrome profile directory for debug browser |
 | `WT_CHROME_BIN` | auto-detected | Chrome binary override |

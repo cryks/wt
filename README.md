@@ -191,6 +191,7 @@ If nothing is detected, dependency installation is skipped with an explicit mess
 |---|---|---|
 | `WT_BRANCH_NAME_MODEL` | `opencode-go/kimi-k2.5` | OpenCode model used for AI branch name suggestion in `wt new` interactive mode |
 | `WT_MERGE_MODEL` | `opencode-go/glm-5` | OpenCode model used for AI merge conflict resolution |
+| `WT_NEW_WORKTREE_AGENT` | `Build` | OpenCode agent used when `wt new` launches an interactive session in the new worktree |
 | `WT_DEBUG_PORT` | `9222` | Chrome remote debugging port for `wt b` and `wt init` |
 | `WT_DEBUG_USER_DATA_DIR` | `~/.vscode/chrome` | Chrome user data directory for the debug browser |
 | `WT_CHROME_BIN` | auto-detected | Path to a Chrome-compatible browser binary |
