@@ -854,6 +854,34 @@ test_new_with_explicit_branch_does_not_launch_opencode() {
   assert_opencode_log_count "$opencode_log" 0 "wt new with an explicit branch should not invoke opencode"
 }
 
+test_new_copies_root_local_entries_for_worktree_bootstrap() {
+  local repo output worktree
+  repo=$(make_repo)
+  mkdir -p "$repo/.agents/skills/base-skill"
+  printf '# Base skill\n' >"$repo/.agents/skills/base-skill/SKILL.md"
+  commit_repo_state "$repo" "add tracked skills directory"
+
+  printf 'ROOT=1\n' >"$repo/.env"
+  printf 'local config\n' >"$repo/.tool.local"
+  printf '{"enabled":true}\n' >"$repo/settings.local.json"
+  mkdir -p "$repo/.state.local"
+  printf 'cached\n' >"$repo/.state.local/data.txt"
+  mkdir -p "$repo/.agents/skills/foo-skill.local"
+  printf '# Local skill\n' >"$repo/.agents/skills/foo-skill.local/SKILL.md"
+
+  output=$(cd "$repo" && bash "$ROOT/bin/wt" new feature/test 2>&1)
+  worktree="${repo}__worktrees/feature-test"
+
+  assert_contains "$output" "env_files_copied: 5" "wt new should report copied local bootstrap entries from root and tracked directories"
+  assert_file_exists "$worktree/.env" "wt new should copy the root .env file into the new worktree"
+  assert_file_exists "$worktree/.tool.local" "wt new should copy root entries ending in .local"
+  assert_file_exists "$worktree/settings.local.json" "wt new should copy root entries containing .local."
+  assert_file_exists "$worktree/.state.local" "wt new should copy root directories ending in .local"
+  assert_file_exists "$worktree/.state.local/data.txt" "wt new should copy the contents of root .local directories"
+  assert_file_exists "$worktree/.agents/skills/foo-skill.local" "wt new should copy nested .local directories under tracked paths"
+  assert_file_exists "$worktree/.agents/skills/foo-skill.local/SKILL.md" "wt new should copy files inside nested .local directories under tracked paths"
+}
+
 test_wrapper_new_without_args_changes_directory() {
   local repo expected actual fake_bin
   repo=$(make_repo)
@@ -1890,6 +1918,7 @@ test_new_without_args_skips_opencode_when_declined
 test_new_without_args_repompts_for_invalid_launch_confirmation
 test_new_without_args_launches_opencode_with_original_goal_after_branch_edit
 test_new_with_explicit_branch_does_not_launch_opencode
+test_new_copies_root_local_entries_for_worktree_bootstrap
 test_wrapper_new_without_args_changes_directory
 test_wrapper_new_without_args_launches_opencode_and_changes_directory
 test_wrapper_cd_missing_target_keeps_shell_alive

@@ -39,6 +39,18 @@ The CLI and wrapper contracts are intentionally unchanged: `shell/wt.bash` still
 
 Several functions shell out to inline Python scripts (heredocs) for tasks that are painful in pure Bash: JSON parsing, portless `scripts.dev` inspection, Chrome DevTools protocol interaction, OpenCode JSON output extraction, and terminal emulation in tests. Python 3 is the only non-Bash runtime dependency. These inline scripts are deliberately NOT extracted into separate `.py` files — they are coupled to the Bash function that calls them and share no state.
 
+### Worktree bootstrap copy rules
+
+`wt new` bootstraps each linked worktree by copying selected local development entries from the primary checkout into the new worktree when the destination path does not already exist. The copy logic lives in `copy_env_candidates_from_notes` in `lib/wt-worktree.sh` and currently covers:
+
+- the literal `.env` file from `ENV_CANDIDATES`
+- any file or directory whose basename ends with `.local`
+- any file or directory whose basename contains `.local.`
+
+Pattern-based `.local` scanning is intentionally limited to the repo root and directories implied by tracked files. `git_tracked_directories` derives those directories from `git ls-files`, including ancestor directories, so local-only siblings such as `.agents/skills/foo-skill.local/` are copied when their parent directory is part of the tracked project tree.
+
+Copies use `cp -R` so both files and directories are supported.
+
 ### Worktree layout: `<repo>__worktrees/<handle>`
 
 Linked worktrees are stored in a sibling directory named `<repo>__worktrees/` (not inside the repo). This avoids polluting the repository with worktree directories and keeps the layout predictable. The `__worktrees` suffix is hardcoded in `get_worktree_root`.
@@ -115,7 +127,7 @@ These are used in `bin/wt` and can be overridden:
 | `WT_DEBUG_PORT` / `WT_DEBUG_PORT_DEFAULT` | `9222` | Chrome remote debugging port |
 | `WT_DEBUG_USER_DATA_DIR` | `~/.vscode/chrome` | Chrome profile directory for debug browser |
 | `WT_CHROME_BIN` | auto-detected | Chrome binary override |
-| `ENV_CANDIDATES` | `.env`, `.env.local`, `.env.development.local` | Files copied from primary to new worktree |
+| `ENV_CANDIDATES` | `.env` | Literal entries copied from primary to new worktree before pattern-based local override copying |
 | `WT_MANAGED_LAUNCH_NAME` | `wt: attach browser` | Name of the managed VS Code launch configuration |
 
 ## Documentation maintenance rules

@@ -1,16 +1,83 @@
+git_tracked_directories() {
+  local repo_root
+  repo_root=$1
+
+  git -C "$repo_root" ls-files -z | python3 -c '
+import os
+import sys
+
+data = sys.stdin.buffer.read().split(b"\0")
+seen = set()
+ordered = []
+
+def add(path: str) -> None:
+    if path not in seen:
+        seen.add(path)
+        ordered.append(path)
+
+add(".")
+
+for raw_path in data:
+    if not raw_path:
+        continue
+    path = raw_path.decode("utf-8")
+    directory = os.path.dirname(path)
+    while True:
+        add(directory or ".")
+        if not directory:
+            break
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+
+for path in ordered:
+    sys.stdout.buffer.write(path.encode("utf-8") + b"\0")
+'
+}
+
 copy_env_candidates_from_notes() {
-  local source_root target_root copied candidate
+  local source_root target_root copied candidate source_path target_path relative_dir relative_path scan_dir
   source_root=$1
   target_root=$2
   copied=0
 
   for candidate in "${ENV_CANDIDATES[@]}"; do
-    if [ -f "$source_root/$candidate" ] && [ ! -e "$target_root/$candidate" ]; then
-      cp "$source_root/$candidate" "$target_root/$candidate"
+    source_path="$source_root/$candidate"
+    target_path="$target_root/$candidate"
+    if [ -e "$source_path" ] && [ ! -e "$target_path" ]; then
+      cp -R "$source_path" "$target_path"
       copied=$((copied + 1))
       warn "Copied $candidate"
     fi
   done
+
+  while IFS= read -r -d '' relative_dir; do
+    scan_dir="$source_root"
+    if [ "$relative_dir" != "." ]; then
+      scan_dir="$source_root/$relative_dir"
+    fi
+
+    for source_path in "$scan_dir"/.* "$scan_dir"/*; do
+      [ -e "$source_path" ] || continue
+      candidate=$(basename "$source_path")
+      case "$candidate" in
+        .|..) continue ;;
+        *.local|*.local.*)
+          relative_path=$candidate
+          if [ "$relative_dir" != "." ]; then
+            relative_path="$relative_dir/$candidate"
+          fi
+          target_path="$target_root/$relative_path"
+          if [ ! -e "$target_path" ]; then
+            cp -R "$source_path" "$target_path"
+            copied=$((copied + 1))
+            warn "Copied $relative_path"
+          fi
+          ;;
+      esac
+    done
+  done < <(git_tracked_directories "$source_root")
 
   printf '%s\n' "$copied"
 }

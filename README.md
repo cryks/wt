@@ -10,7 +10,7 @@ Core design principles:
 
 - uses a sibling worktree root at `<repo>__worktrees/`
 - keeps the Git branch name separate from the filesystem handle
-- copies common local env files only when the source exists and the target is missing
+- copies local bootstrap files and directories from the repo root and Git-managed directory tree only when the source exists and the target is missing
 - installs dependencies only when it can confidently detect the package manager
 - never starts a dev server or pushes to a remote
 
@@ -54,6 +54,8 @@ The wrapper resolves the bundled `bin/wt` directly, so it does not depend on `co
 ### `wt new [branch]`
 
 Create a linked worktree for a branch.
+
+During creation, `wt new` also copies local bootstrap entries from the primary checkout into the new worktree when they exist and the destination path is missing. This covers the standard `.env` file plus any file or directory whose basename matches `*.local` or `*.local.*` at the repo root or inside directories implied by tracked files. For example, a local-only skill at `.agents/skills/foo-skill.local/` is copied when `.agents/skills/` is part of the tracked project tree.
 
 ```bash
 wt new feature/test

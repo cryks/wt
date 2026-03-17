@@ -1,4 +1,4 @@
-ENV_CANDIDATES=(".env" ".env.local" ".env.development.local")
+ENV_CANDIDATES=(".env")
 WT_MANAGED_LAUNCH_NAME="wt: attach browser"
 WT_DEBUG_PORT_DEFAULT="9222"
 WT_BRANCH_NAME_MODEL="${WT_BRANCH_NAME_MODEL:-opencode-go/kimi-k2.5}"
