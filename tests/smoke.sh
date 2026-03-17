@@ -40,6 +40,23 @@ assert_not_contains() {
   esac
 }
 
+assert_in_order() {
+  local haystack first second message
+  haystack=$1
+  first=$2
+  second=$3
+  message=$4
+  python3 - "$haystack" "$first" "$second" "$message" <<'PY'
+import sys
+
+haystack, first, second, message = sys.argv[1:5]
+first_index = haystack.find(first)
+second_index = haystack.find(second)
+if first_index == -1 or second_index == -1 or first_index >= second_index:
+    raise SystemExit(f"{message}\nfirst:  {first}\nsecond: {second}\ntext: {haystack}")
+PY
+}
+
 assert_file_exists() {
   local path message
   path=$1
@@ -119,6 +136,18 @@ case "${1-}" in
 esac
 EOF
   chmod +x "$dir/portless"
+  printf '%s\n' "$dir"
+}
+
+make_fake_npm_bin() {
+  local dir
+  dir=$(mktemp -d)
+  cat >"$dir/npm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'WT_TEST_NPM install %s\n' "$*"
+EOF
+  chmod +x "$dir/npm"
   printf '%s\n' "$dir"
 }
 
@@ -282,12 +311,17 @@ def clear_to_end() -> None:
 while i < len(text):
     ch = text[i]
 
-    if ch == "\x1b" and i + 2 < len(text) and text[i + 1] == "[":
-        cmd = text[i + 2]
+    if ch == "\x1b" and i + 1 < len(text) and text[i + 1] == "[":
+        j = i + 2
+        while j < len(text) and text[j] not in "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~":
+            j += 1
+        if j >= len(text):
+            break
+        cmd = text[j]
         if cmd == "K":
             clear_to_end()
-            i += 3
-            continue
+        i = j + 1
+        continue
 
     if ch == "\r":
         col = 0
@@ -617,6 +651,9 @@ test_new_without_args_accepts_opencode_suggestion() {
   )
 
   assert_file_exists "${repo}__worktrees/feat-generated-branch" "wt new without args should create the suggested worktree"
+  assert_contains "$output" "Created worktree" "wt new without args should group the creation summary under a readable heading"
+  assert_contains "$output" "Worktree" "wt new without args should group git worktree setup progress under a readable heading"
+  assert_not_contains "$output" "Next steps" "wt new should no longer print a separate next steps section"
   assert_contains "$output" "branch: feat/generated-branch" "wt new without args should use the suggested branch by default"
   prompt_log=$(cat "$opencode_log")
   assert_contains "$prompt_log" "opencode-go/kimi-k2.5" "wt new without args should request the dedicated branch-name model"
@@ -854,6 +891,86 @@ test_new_with_explicit_branch_does_not_launch_opencode() {
   assert_opencode_log_count "$opencode_log" 0 "wt new with an explicit branch should not invoke opencode"
 }
 
+test_new_with_explicit_branch_is_plain_when_not_in_pty() {
+  local repo output expected_worktree
+  repo=$(make_repo)
+
+  output=$(cd "$repo" && bash "$ROOT/bin/wt" new feature/test 2>&1)
+  expected_worktree=$(cd "${repo}__worktrees/feature-test" && pwd -P)
+
+  assert_not_contains "$output" $'\033[' "wt new should not emit ANSI colors when stdout is not a TTY"
+  assert_contains "$output" "  worktree_path: $expected_worktree" "wt new should keep indented detail lines even when stdout is not a TTY"
+}
+
+test_new_with_explicit_branch_uses_cli_styling_in_pty() {
+  local repo output rendered_output expected_worktree
+  repo=$(make_repo)
+  printf 'ROOT=1\n' >"$repo/.env"
+  printf 'local config\n' >"$repo/.tool.local"
+
+  output=$(cd "$repo" && run_in_pty '' bash "$ROOT/bin/wt" new feature/test)
+  rendered_output=$(render_terminal_output "$output")
+  expected_worktree=$(cd "${repo}__worktrees/feature-test" && pwd -P)
+
+  assert_contains "$output" $'\033[' "wt new should emit ANSI colors when stdout is a TTY"
+  assert_not_contains "$output" $'\033[0;33m' "wt new should not color worktree status lines yellow"
+  assert_contains "$rendered_output" "==> Worktree" "wt new should render a CLI-style worktree progress section in a PTY"
+  assert_contains "$rendered_output" "  -> Preparing worktree (new branch 'feature/test')" "wt new should show git worktree preparation as an indented status line"
+  assert_contains "$rendered_output" "==> Created worktree" "wt new should render a CLI-style section heading in a PTY"
+  assert_contains "$rendered_output" "  worktree_path: $expected_worktree" "wt new should indent detail lines in a PTY"
+  assert_not_contains "$rendered_output" "  repo_root:" "wt new should not print the repo root in the created worktree section"
+  assert_not_contains "$rendered_output" "  handle:" "wt new should not print the normalized handle in the created worktree section"
+  assert_contains "$rendered_output" "  copied_entries: 2" "wt new should show a bootstrap parent detail before copied entries"
+  assert_contains "$rendered_output" "    - copied: .env" "wt new should list copied bootstrap entries in a PTY"
+  assert_contains "$rendered_output" "    - copied: .tool.local" "wt new should list copied local config entries in a PTY"
+  assert_not_contains "$rendered_output" "==> Next steps" "wt new should no longer render a next steps section"
+}
+
+test_new_reports_worktree_before_dependency_install() {
+  local repo fake_npm output
+  repo=$(make_repo)
+  printf '{"name":"demo","private":true}\n' >"$repo/package.json"
+  printf '{}' >"$repo/package-lock.json"
+  commit_repo_state "$repo" "add npm project"
+  fake_npm=$(make_fake_npm_bin)
+
+  output=$(cd "$repo" && PATH="$fake_npm:$PATH" bash "$ROOT/bin/wt" new feature/test 2>&1)
+
+  assert_in_order "$output" "==> Worktree" "Installing dependencies with: npm install --prefer-offline" "wt new should print the worktree section before the install announcement"
+  assert_in_order "$output" "Installing dependencies with: npm install --prefer-offline" "WT_TEST_NPM install install --prefer-offline" "wt new should print the install announcement before installer output"
+  assert_contains "$output" $'\n\nInstalling dependencies with: npm install --prefer-offline\n\nWT_TEST_NPM install install --prefer-offline' "wt new should visually separate the install announcement from the worktree section and installer output"
+}
+
+test_wrapper_new_reports_worktree_before_dependency_install() {
+  local repo fake_npm output rendered_output
+  repo=$(make_repo)
+  printf '{"name":"demo","private":true}\n' >"$repo/package.json"
+  printf '{}' >"$repo/package-lock.json"
+  commit_repo_state "$repo" "add npm project"
+  fake_npm=$(make_fake_npm_bin)
+
+  output=$(PATH="$fake_npm:/usr/bin:/bin:/usr/sbin:/sbin" run_in_pty '' bash -lc 'source "$1/shell/wt.bash" && cd "$2" && wt new feature/test' bash "$ROOT" "$repo")
+  rendered_output=$(render_terminal_output "$output")
+
+  assert_in_order "$rendered_output" "==> Worktree" "Installing dependencies with: npm install --prefer-offline" "wrapper wt new should print the worktree section before the install announcement"
+  assert_in_order "$rendered_output" "Installing dependencies with: npm install --prefer-offline" "WT_TEST_NPM install install --prefer-offline" "wrapper wt new should print the install announcement before installer output"
+  assert_contains "$output" $'\033[2mWT_TEST_NPM install install --prefer-offline\033[0m' "wrapper wt new should dim installer output in a PTY"
+}
+
+test_wrapper_new_with_explicit_branch_uses_cli_styling() {
+  local repo output rendered_output expected_worktree
+  repo=$(make_repo)
+
+  output=$(run_in_pty '' bash -lc 'source "$1/shell/wt.bash" && cd "$2" && wt new feature/test' bash "$ROOT" "$repo")
+  rendered_output=$(render_terminal_output "$output")
+  expected_worktree=$(cd "${repo}__worktrees/feature-test" && pwd -P)
+
+  assert_contains "$output" $'\033[' "wrapper wt new should preserve ANSI styling for interactive shells"
+  assert_contains "$rendered_output" "==> Worktree" "wrapper wt new should print CLI-style worktree headings"
+  assert_contains "$rendered_output" "==> Created worktree" "wrapper wt new should print CLI-style headings"
+  assert_contains "$rendered_output" "  worktree_path: $expected_worktree" "wrapper wt new should keep indented detail lines visible"
+}
+
 test_new_copies_root_local_entries_for_worktree_bootstrap() {
   local repo output worktree
   repo=$(make_repo)
@@ -872,7 +989,10 @@ test_new_copies_root_local_entries_for_worktree_bootstrap() {
   output=$(cd "$repo" && bash "$ROOT/bin/wt" new feature/test 2>&1)
   worktree="${repo}__worktrees/feature-test"
 
-  assert_contains "$output" "env_files_copied: 5" "wt new should report copied local bootstrap entries from root and tracked directories"
+  assert_contains "$output" "Bootstrap" "wt new should print bootstrap details in a dedicated section"
+  assert_contains "$output" "copied_entries: 5" "wt new should print a bootstrap parent detail before the copied entries list"
+  assert_contains "$output" "copied: .env" "wt new should list copied bootstrap files"
+  assert_contains "$output" "copied: .agents/skills/foo-skill.local" "wt new should list copied nested local directories"
   assert_file_exists "$worktree/.env" "wt new should copy the root .env file into the new worktree"
   assert_file_exists "$worktree/.tool.local" "wt new should copy root entries ending in .local"
   assert_file_exists "$worktree/settings.local.json" "wt new should copy root entries containing .local."
@@ -1161,17 +1281,35 @@ EOF
 }
 
 test_rm_explicit_target_deletes_clean_branch() {
-  local repo worktree
+  local repo worktree output expected_worktree
   repo=$(make_repo)
   worktree="${repo}__worktrees/feature-test"
   git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+  expected_worktree=$(cd "$worktree" && pwd -P)
 
-  (cd "$repo" && bash "$ROOT/bin/wt" rm feature/test >/dev/null)
+  output=$(cd "$repo" && bash "$ROOT/bin/wt" rm feature/test)
 
+  assert_contains "$output" "Remove" "wt rm should print a remove section before deleting a worktree"
+  assert_contains "$output" "Removed" "wt rm should print a removed section after deleting a worktree"
+  assert_contains "$output" "removed_worktree: $expected_worktree" "wt rm should report the removed worktree path"
+  assert_contains "$output" "removed_branch: feature/test" "wt rm should report the removed branch name"
   assert_file_missing "$worktree" "wt rm with an explicit clean target should remove the worktree"
   if git -C "$repo" show-ref --verify --quiet refs/heads/feature/test; then
     fail "wt rm with an explicit clean target should delete the branch"
   fi
+}
+
+test_rm_explicit_target_dims_subprocess_output_in_pty() {
+  local repo worktree output rendered_output
+  repo=$(make_repo)
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  output=$(cd "$repo" && run_in_pty '' bash "$ROOT/bin/wt" rm feature/test)
+  rendered_output=$(render_terminal_output "$output")
+
+  assert_contains "$output" $'\033[2mDeleted branch feature/test' "wt rm should dim raw subprocess output in a PTY"
+  assert_contains "$rendered_output" "Deleted branch feature/test" "wt rm should still show the git subprocess output text"
 }
 
 test_rm_explicit_target_leaves_unmerged_branch_when_branch_delete_fails() {
@@ -1353,6 +1491,41 @@ test_b_reuses_debug_browser_for_requested_worktree() {
   assert_contains "$(cat "$devtools_log")" $'\thttps://feature-test.myapp.localhost:1355' "wt b should open the requested worktree URL through DevTools reuse"
 }
 
+test_b_uses_cli_section_output() {
+  local repo fake_bin chrome_bin devtools_bin browser_log devtools_log debug_port user_data_dir browser_pids output
+  repo=$(make_repo)
+  write_portless_package_json "$repo" "guidance-studio" "portless myapp pnpm dev"
+  commit_repo_state "$repo" "add package"
+  fake_bin=$(make_fake_portless_bin)
+  chrome_bin=$(make_fake_browser_bin)
+  devtools_bin=$(make_fake_devtools_bin)
+  browser_log=$(mktemp)
+  devtools_log=$(mktemp)
+  browser_pids=$(mktemp)
+  debug_port=$(free_port)
+  user_data_dir=$(mktemp -d)
+
+  output=$(
+    cd "$repo" && \
+    PATH="$fake_bin:$PATH" \
+    WT_CHROME_BIN="$chrome_bin" \
+    WT_DEBUG_PORT="$debug_port" \
+    WT_DEBUG_USER_DATA_DIR="$user_data_dir" \
+    WT_TEST_BROWSER_LOG="$browser_log" \
+    WT_TEST_DEVTOOLS_LOG="$devtools_log" \
+    WT_TEST_DEVTOOLS_READY_DELAY=0.2 \
+    WT_TEST_FAKE_DEVTOOLS_BIN="$devtools_bin" \
+    WT_TEST_BROWSER_AUTOLISTEN=1 \
+    WT_TEST_BROWSER_PIDS="$browser_pids" \
+    bash "$ROOT/bin/wt" b
+  )
+
+  assert_contains "$output" "Browser" "wt b should print a browser section"
+  assert_contains "$output" "browser: started" "wt b should report the browser launch outcome"
+  assert_contains "$output" "debug_url: https://myapp.localhost:1355" "wt b should report the debug url in structured output"
+  cleanup_pids_file "$browser_pids"
+}
+
 test_b_rejects_non_devtools_listener_on_debug_port() {
   local repo fake_bin chrome_bin browser_log debug_port server_pid output
   repo=$(make_repo)
@@ -1433,6 +1606,8 @@ printf 'cwd=%s\n' "\$(pwd -P)"
 EOF
 )
 
+  assert_contains "$output" "Merge" "wt merge should print a dedicated merge section"
+  assert_contains "$output" "Removed" "wt merge should print a removed section after cleanup"
   assert_contains "$output" "merge: fast-forward" "wt merge should report fast-forward"
   assert_contains "$output" "removed_worktree:" "wt merge should remove the worktree"
   assert_contains "$output" "removed_branch: feature/test" "wt merge should delete the branch"
@@ -1466,6 +1641,8 @@ printf 'cwd=%s\n' "\$(pwd -P)"
 EOF
 )
 
+  assert_contains "$output" "Merge" "wt merge should print a dedicated merge section"
+  assert_contains "$output" "Removed" "wt merge should print a removed section after cleanup"
   assert_contains "$output" "merge: resolved without conflicts" "wt merge should report clean reverse merge"
   assert_contains "$output" "merge: primary updated" "wt merge should report primary updated"
   assert_contains "$output" "removed_worktree:" "wt merge should remove the worktree"
@@ -1688,6 +1865,7 @@ printf 'cwd=%s\n' "\$(pwd -P)"
 EOF
 )
 
+  assert_contains "$output" "Sync" "wt sync should print a dedicated sync section"
   assert_contains "$output" "sync: fast-forward" "wt sync should fast-forward when the current branch has no unique commits"
   assert_contains "$output" "cwd=$expected_worktree" "wt sync should keep the shell in the current worktree"
   assert_file_exists "$worktree/primary.txt" "wt sync should bring primary changes into the current worktree"
@@ -1713,6 +1891,7 @@ test_sync_non_ff_clean() {
 
   output=$(cd "$worktree" && bash "$ROOT/bin/wt" sync)
 
+  assert_contains "$output" "Sync" "wt sync should print a dedicated sync section"
   assert_contains "$output" "sync: resolved without conflicts" "wt sync should report a clean merge when both branches moved"
   assert_file_exists "$worktree/feature.txt" "wt sync should retain the current branch changes"
   assert_file_exists "$worktree/primary.txt" "wt sync should merge in the primary branch changes"
@@ -1891,15 +2070,33 @@ test_sync_with_conflicts_missing_opencode_aborts_cleanly() {
 }
 
 test_new_runs_init_for_portless_worktree() {
-  local repo fake_bin
+  local repo fake_bin output expected_worktree
   repo=$(make_repo)
   write_portless_package_json "$repo" "guidance-studio" "portless run --name guidance env -u HOST nuxt dev"
   commit_repo_state "$repo" "add package"
   fake_bin=$(make_fake_portless_bin)
 
-  (cd "$repo" && PATH="$fake_bin:$PATH" bash "$ROOT/bin/wt" new feature/test >/dev/null)
+  output=$(cd "$repo" && PATH="$fake_bin:$PATH" bash "$ROOT/bin/wt" new feature/test 2>&1)
+  expected_worktree=$(cd "${repo}__worktrees/feature-test" && pwd -P)
 
   assert_launch_json "${repo}__worktrees/feature-test/.vscode/launch.json" "https://feature-test.guidance.localhost:1355" "9222"
+  assert_contains "$output" "Bootstrap" "wt new should keep bootstrap output grouped after worktree creation"
+  assert_contains "$output" "launch_json: $expected_worktree/.vscode/launch.json" "wt new should include the generated launch.json path in the bootstrap section"
+  assert_not_contains "$output" "debug_port:" "wt new should not print the debug port in the bootstrap section"
+}
+
+test_init_uses_cli_sections() {
+  local repo fake_bin output
+  repo=$(make_repo)
+  write_portless_package_json "$repo" "guidance-studio" "portless run --name guidance env -u HOST nuxt dev"
+  commit_repo_state "$repo" "add package"
+  fake_bin=$(make_fake_portless_bin)
+
+  output=$(cd "$repo" && PATH="$fake_bin:$PATH" bash "$ROOT/bin/wt" init 2>&1)
+
+  assert_contains "$output" "Debug config" "wt init should print a dedicated debug config section"
+  assert_contains "$output" "launch_json: " "wt init should report the managed launch file path"
+  assert_contains "$output" "debug_url: https://guidance.localhost:1355" "wt init should report the derived debug url"
 }
 
 test_cd_matches_open
@@ -1918,6 +2115,11 @@ test_new_without_args_skips_opencode_when_declined
 test_new_without_args_repompts_for_invalid_launch_confirmation
 test_new_without_args_launches_opencode_with_original_goal_after_branch_edit
 test_new_with_explicit_branch_does_not_launch_opencode
+test_new_with_explicit_branch_is_plain_when_not_in_pty
+test_new_with_explicit_branch_uses_cli_styling_in_pty
+test_new_reports_worktree_before_dependency_install
+test_wrapper_new_reports_worktree_before_dependency_install
+test_wrapper_new_with_explicit_branch_uses_cli_styling
 test_new_copies_root_local_entries_for_worktree_bootstrap
 test_wrapper_new_without_args_changes_directory
 test_wrapper_new_without_args_launches_opencode_and_changes_directory
@@ -1933,6 +2135,7 @@ test_wrapper_rm_without_args_dirty_keeps_current_directory
 test_wrapper_rm_force_without_args_removes_dirty_current_worktree_and_branch
 test_wrapper_rm_without_args_works_from_non_main_primary_branch
 test_rm_explicit_target_deletes_clean_branch
+test_rm_explicit_target_dims_subprocess_output_in_pty
 test_rm_explicit_target_leaves_unmerged_branch_when_branch_delete_fails
 test_ls_shows_branch_first
 test_ls_marks_primary_worktree_as_primary
@@ -1941,8 +2144,10 @@ test_init_preserves_unrelated_configs_and_removes_browser_launch
 test_init_derives_name_for_portless_run
 test_b_starts_debug_browser_for_current_worktree
 test_b_reuses_debug_browser_for_requested_worktree
+test_b_uses_cli_section_output
 test_b_rejects_non_devtools_listener_on_debug_port
 test_new_runs_init_for_portless_worktree
+test_init_uses_cli_sections
 test_merge_fast_forward
 test_merge_non_ff_clean
 test_merge_refuses_dirty_worktree

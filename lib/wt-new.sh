@@ -166,8 +166,37 @@ resolve_new_worktree_request() {
   fi
 }
 
+run_worktree_add_and_report() {
+  local repo_root target_path branch worktree_add_mode line status
+  repo_root=$1
+  target_path=$2
+  branch=$3
+  worktree_add_mode=$4
+
+  note_section "Worktree"
+  if [ "$worktree_add_mode" = "existing" ]; then
+    git -C "$repo_root" worktree add "$target_path" "$branch" 2>&1 \
+      | while IFS= read -r line; do
+          [ -n "$line" ] || continue
+          note_status "$line"
+        done
+    status=${PIPESTATUS[0]}
+  else
+    git -C "$repo_root" worktree add -b "$branch" "$target_path" HEAD 2>&1 \
+      | while IFS= read -r line; do
+          [ -n "$line" ] || continue
+          note_status "$line"
+        done
+    status=${PIPESTATUS[0]}
+  fi
+
+  if [ "$status" -ne 0 ]; then
+    die "Failed to create worktree at: $target_path"
+  fi
+}
+
 create_worktree_for_branch() {
-  local branch repo_root worktree_root handle target_path env_copied package_manager i
+  local branch repo_root worktree_root handle target_path env_copied package_manager init_status bootstrap_printed i copied_path
   branch=$1
 
   repo_root=$(get_main_repo_root)
@@ -189,37 +218,44 @@ create_worktree_for_branch() {
   done
 
   if branch_exists_locally "$repo_root" "$branch"; then
-    git -C "$repo_root" worktree add "$target_path" "$branch"
+    run_worktree_add_and_report "$repo_root" "$target_path" "$branch" "existing"
   else
-    git -C "$repo_root" worktree add -b "$branch" "$target_path" HEAD
+    run_worktree_add_and_report "$repo_root" "$target_path" "$branch" "new"
   fi
 
-  env_copied=$(copy_env_candidates_from_notes "$repo_root" "$target_path")
+  copy_env_candidates_from_notes "$repo_root" "$target_path" >/dev/null
+  env_copied=$WT_LAST_COPIED_COUNT
   if inspect_portless_dev_script "$target_path" >/dev/null 2>&1; then
-    initialize_worktree_debug_config "$target_path"
+    initialize_worktree_debug_config "$target_path" 0
+    init_status="ready"
   else
-    warn "Skipping wt init: package.json scripts.dev is not a supported portless command"
+    init_status="skipped"
   fi
   package_manager=$(detect_package_manager "$target_path")
 
   if [ -n "$package_manager" ]; then
     run_install_for_worktree "$target_path" "$package_manager"
-  else
-    warn "Skipping dependency installation: no supported lockfile or packageManager hint found"
   fi
 
-  note "repo_root: $repo_root"
-  note "worktree_path: $target_path"
-  note "branch: $branch"
-  note "handle: $handle"
-  note "env_files_copied: $env_copied"
-  if [ -n "$package_manager" ]; then
-    note "package_manager: $package_manager"
-  else
-    note "package_manager: skipped"
+  note_section "Created worktree"
+  note_detail "worktree_path" "$target_path"
+  note_detail "branch" "$branch"
+
+  bootstrap_printed=0
+  if [ "$env_copied" -gt 0 ]; then
+    note_section "Bootstrap"
+    bootstrap_printed=1
+    note_detail "copied_entries" "$env_copied"
+    for copied_path in "${WT_LAST_COPIED_ITEMS[@]}"; do
+      note_list_item "copied: $copied_path"
+    done
   fi
-  note "next: cd \"$(printf '%s' "$target_path")\""
-  note "next: wt open $branch"
-  note "portless: if this repo uses portless, linked worktrees should get distinct local URLs when you start the app yourself"
+  if [ "$init_status" = "ready" ]; then
+    if [ "$bootstrap_printed" -eq 0 ]; then
+      note_section "Bootstrap"
+      bootstrap_printed=1
+    fi
+    note_detail "launch_json" "$target_path/.vscode/launch.json"
+    note_detail "debug_url" "$(derive_portless_url "$target_path")"
+  fi
 }
-

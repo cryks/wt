@@ -57,6 +57,10 @@ Create a linked worktree for a branch.
 
 During creation, `wt new` also copies local bootstrap entries from the primary checkout into the new worktree when they exist and the destination path is missing. This covers the standard `.env` file plus any file or directory whose basename matches `*.local` or `*.local.*` at the repo root or inside directories implied by tracked files. For example, a local-only skill at `.agents/skills/foo-skill.local/` is copied when `.agents/skills/` is part of the tracked project tree.
 
+After creation, `wt new` prints a grouped human-readable summary with `Worktree`, `Created worktree`, and `Bootstrap` sections. The raw `git worktree add` messages are folded into that summary and streamed immediately instead of appearing only after later bootstrap steps finish. In an interactive terminal it also adds ANSI color, indentation, and copied-entry details to feel more like a CLI tool, while non-interactive output stays plain text. The existing parseable `key: value` lines such as `worktree_path: ...` remain in place so the shell wrapper can still extract the new worktree path.
+
+`wt init`, `wt b`, `wt merge`, `wt sync`, and `wt rm` use the same section-oriented output style so the CLI feels consistent across the main workflow commands. When these commands surface subprocess output, interactive terminals render that subprocess output dimmed so the higher-level `wt` summary stays visually primary.
+
 ```bash
 wt new feature/test
 ```

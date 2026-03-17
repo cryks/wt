@@ -93,6 +93,10 @@ The wrapper defines a `wt` shell function that intercepts `cd`, `new`, `rm`, and
 
 Key subtlety: `wt rm` without arguments must `cd` back to the primary worktree BEFORE calling `bin/wt rm`, because you cannot remove a worktree while standing inside it. The wrapper detects this situation, resolves the primary worktree path, `cd`s there, then delegates removal. For dirty worktrees, the wrapper intentionally does NOT `cd` away first — it lets `bin/wt rm` fail with the expected error while keeping the user in their current directory.
 
+The wrapper also depends on `wt new` continuing to emit a parseable `worktree_path: ...` line on stdout. Human-readable headings, indentation, and TTY-only ANSI styling may be added around the summary, but that field name must remain stable so `_wt_output_field` can still `cd` into the created worktree. The wrapper-side parser trims leading indentation and strips ANSI sequences before matching output fields.
+
+`wt new` folds the raw `git worktree add` output into a dedicated `Worktree` section and streams those lines immediately before later bootstrap tasks such as dependency installation. This avoids the confusing delay where setup progress would only appear after `pnpm install`/`npm install` finished.
+
 ### Portless URL derivation
 
 When a repo's `package.json` `scripts.dev` uses portless, `wt` derives the app name through `inspect_portless_dev_script` (a Python parser that handles both `portless <name> <cmd>` and `portless run [--name <name>] -- <cmd>` forms). If the name is explicit, it is used directly. If only `portless run` without `--name` is found, the name is inferred from the nearest `package.json` `name` field or the repository directory name (`infer_portless_base_name`).
@@ -105,6 +109,10 @@ The actual URL is obtained by running `portless get <name>` inside the worktree 
 - External dependencies are replaced with fake binaries created at test time (`make_fake_opencode_bin`, `make_fake_portless_bin`, `make_fake_browser_bin`, etc.).
 - Tests that require an interactive terminal use `run_in_pty`, which spawns a pseudo-terminal via Python.
 - Terminal output with ANSI escape sequences is rendered via `render_terminal_output` for assertions.
+- `wt new` output tests should preserve both layers of the contract: human-readable headings like `Worktree` / `Created worktree` / `Bootstrap`, and stable machine-readable `key: value` lines such as `worktree_path:` and `branch:`.
+- Workflow command output (`wt init`, `wt b`, `wt merge`, `wt sync`, `wt rm`) may also use section headings so long as existing machine-readable lines and wrapper contracts remain intact.
+- Visible subprocess output within workflow commands should be dimmed in TTY mode so `wt` summary lines remain visually primary.
+- PTY-oriented `wt new` tests may assert ANSI-colored output via raw capture and then use `render_terminal_output` to normalize escape sequences before checking the rendered text.
 - Tests create temporary Git repositories with `make_repo` and clean up automatically (they live in `/tmp`).
 - All test functions are listed at the bottom of the file and run sequentially.
 - To run: `bash tests/smoke.sh`

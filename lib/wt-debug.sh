@@ -76,14 +76,18 @@ PY
 }
 
 initialize_worktree_debug_config() {
-  local target_root url debug_port
+  local target_root emit_output url debug_port
   target_root=$1
+  emit_output=${2:-1}
   url=$(derive_portless_url "$target_root")
   debug_port=$(get_debug_port)
   update_launch_json "$target_root" "$url" "$WT_MANAGED_LAUNCH_NAME" "$debug_port"
-  note "launch_json: $target_root/.vscode/launch.json"
-  note "debug_url: $url"
-  note "debug_port: $debug_port"
+  if [ "$emit_output" != "0" ]; then
+    note_section "Debug config"
+    note_detail "launch_json" "$target_root/.vscode/launch.json"
+    note_detail "debug_url" "$url"
+    note_detail "debug_port" "$debug_port"
+  fi
 }
 
 resolve_target_root_or_current() {
@@ -263,7 +267,7 @@ launch_debug_browser_for_url() {
 
   if debug_port_is_listening "$debug_port"; then
     if debug_browser_is_reusable "$debug_port" && open_url_in_debug_browser "$debug_port" "$url"; then
-      note "browser: reused"
+      note_detail "browser" "reused"
       return 0
     fi
     die "Debug port $debug_port is already in use by a non-reusable service. Free the port or set WT_DEBUG_PORT to another value."
@@ -283,5 +287,5 @@ launch_debug_browser_for_url() {
     die "Debug browser failed to open $url via DevTools on port $debug_port"
   fi
 
-  note "browser: started"
+  note_detail "browser" "started"
 }

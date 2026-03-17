@@ -36,11 +36,16 @@ for path in ordered:
 '
 }
 
+WT_LAST_COPIED_COUNT=0
+WT_LAST_COPIED_ITEMS=()
+
 copy_env_candidates_from_notes() {
   local source_root target_root copied candidate source_path target_path relative_dir relative_path scan_dir
   source_root=$1
   target_root=$2
   copied=0
+  WT_LAST_COPIED_COUNT=0
+  WT_LAST_COPIED_ITEMS=()
 
   for candidate in "${ENV_CANDIDATES[@]}"; do
     source_path="$source_root/$candidate"
@@ -48,7 +53,7 @@ copy_env_candidates_from_notes() {
     if [ -e "$source_path" ] && [ ! -e "$target_path" ]; then
       cp -R "$source_path" "$target_path"
       copied=$((copied + 1))
-      warn "Copied $candidate"
+      WT_LAST_COPIED_ITEMS+=("$candidate")
     fi
   done
 
@@ -72,13 +77,14 @@ copy_env_candidates_from_notes() {
           if [ ! -e "$target_path" ]; then
             cp -R "$source_path" "$target_path"
             copied=$((copied + 1))
-            warn "Copied $relative_path"
+            WT_LAST_COPIED_ITEMS+=("$relative_path")
           fi
           ;;
       esac
     done
   done < <(git_tracked_directories "$source_root")
 
+  WT_LAST_COPIED_COUNT=$copied
   printf '%s\n' "$copied"
 }
 
@@ -92,16 +98,22 @@ run_install_for_worktree() {
 
   case "$package_manager" in
     pnpm)
-      warn "Installing dependencies with: pnpm install --prefer-offline"
-      (cd "$target_root" && pnpm install --prefer-offline)
+      note ""
+      note "Installing dependencies with: pnpm install --prefer-offline"
+      note ""
+      run_command_with_dimmed_output bash -lc 'cd "$1" && pnpm install --prefer-offline' bash "$target_root"
       ;;
     npm)
-      warn "Installing dependencies with: npm install --prefer-offline"
-      (cd "$target_root" && npm install --prefer-offline)
+      note ""
+      note "Installing dependencies with: npm install --prefer-offline"
+      note ""
+      run_command_with_dimmed_output bash -lc 'cd "$1" && npm install --prefer-offline' bash "$target_root"
       ;;
     bun)
-      warn "Installing dependencies with: bun install"
-      (cd "$target_root" && bun install)
+      note ""
+      note "Installing dependencies with: bun install"
+      note ""
+      run_command_with_dimmed_output bash -lc 'cd "$1" && bun install' bash "$target_root"
       ;;
     *)
       die "Unsupported package manager: $package_manager"

@@ -19,15 +19,24 @@ _wt_bin_path() {
 }
 
 _wt_output_field() {
-  local output field prefix line
+  local output field prefix line trimmed stripped
   output=$1
   field=$2
   prefix="$field: "
 
   while IFS= read -r line; do
-    case "$line" in
+    stripped=$(printf '%s' "$line" | python3 -c 'import re,sys; print(re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", sys.stdin.read()), end="")')
+    trimmed=$stripped
+    while :; do
+      case "$trimmed" in
+        ' '*) trimmed=${trimmed# } ;;
+        $'\t'*) trimmed=${trimmed#$'\t'} ;;
+        *) break ;;
+      esac
+    done
+    case "$trimmed" in
       "$prefix"*)
-        printf '%s\n' "${line#"$prefix"}"
+        printf '%s\n' "${trimmed#"$prefix"}"
         return 0
         ;;
     esac
@@ -38,8 +47,26 @@ EOF
   return 1
 }
 
+_wt_run_and_capture_stdout() {
+  local output_file exit_code
+  output_file=$1
+  shift
+
+  : >"$output_file"
+  if [ -n "${ZSH_VERSION:-}" ]; then
+    setopt local_options pipe_fail 2>/dev/null || true
+    "$@" | tee "$output_file"
+    exit_code=${pipestatus[1]}
+  else
+    "$@" | tee "$output_file"
+    exit_code=${PIPESTATUS[0]}
+  fi
+
+  return "$exit_code"
+}
+
 wt() {
-  local wt_bin target_path branch rm_force rm_target current_root main_root current_branch common_dir new_output wt_status
+  local wt_bin target_path branch rm_force rm_target current_root main_root current_branch common_dir new_output wt_status new_output_file
   wt_bin=$(_wt_bin_path)
   [ -x "$wt_bin" ] || {
     printf 'wt wrapper error: missing executable at %s\n' "$wt_bin" >&2
@@ -62,12 +89,20 @@ wt() {
       builtin cd -- "$target_path"
       ;;
     new)
-      if new_output=$("$wt_bin" "$@"); then
+      new_output_file=$(mktemp)
+      if [ -t 1 ]; then
+        if _wt_run_and_capture_stdout "$new_output_file" env WT_FORCE_STDOUT_STYLE=1 "$wt_bin" "$@"; then
+          wt_status=0
+        else
+          wt_status=$?
+        fi
+      elif _wt_run_and_capture_stdout "$new_output_file" "$wt_bin" "$@"; then
         wt_status=0
       else
         wt_status=$?
       fi
-      [ -z "$new_output" ] || printf '%s\n' "$new_output"
+      new_output=$(<"$new_output_file")
+      rm -f "$new_output_file"
       [ $wt_status -eq 0 ] || return $wt_status
       if target_path=$(_wt_output_field "$new_output" "worktree_path"); then
         :

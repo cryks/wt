@@ -48,8 +48,9 @@ cmd_b() {
   [ $# -le 1 ] || die "Usage: wt b [branch-or-handle]"
   target_root=$(resolve_target_root_or_current "$@")
   url=$(derive_portless_url "$target_root")
+  note_section "Browser"
   launch_debug_browser_for_url "$url"
-  note "debug_url: $url"
+  note_detail "debug_url" "$url"
 }
 
 
@@ -144,17 +145,27 @@ cmd_rm() {
       ;;
   esac
 
+  note_section "Remove"
+  note_detail "worktree_path" "$target_path"
+  if [ "$target_branch" != "HEAD" ]; then
+    note_detail "branch" "$target_branch"
+  fi
+  if [ $force -eq 1 ]; then
+    note_detail "force" "true"
+  fi
+
   cmd=(git -C "$main_repo_root" worktree remove)
   if [ $force -eq 1 ]; then
     cmd+=(--force)
   fi
   cmd+=("$target_path")
-  "${cmd[@]}"
+  run_command_with_dimmed_output "${cmd[@]}"
 
-  note "removed_worktree: $target_path"
+  note_section "Removed"
+  note_detail "removed_worktree" "$target_path"
 
   if [ "$target_branch" = "HEAD" ]; then
-    note "branch_retained: $target_branch"
+    note_detail "branch_retained" "$target_branch"
     return 0
   fi
 
@@ -166,8 +177,8 @@ cmd_rm() {
   fi
   branch_cmd+=("$target_branch")
 
-  if "${branch_cmd[@]}"; then
-    note "removed_branch: $target_branch"
+  if run_command_with_dimmed_output "${branch_cmd[@]}"; then
+    note_detail "removed_branch" "$target_branch"
     return 0
   fi
 
@@ -195,7 +206,7 @@ merge_branch_into_current() {
   action_title=$5
 
   if merge_output=$(git -C "$target_root" merge "$incoming_branch" 2>&1); then
-    note "$action_label: resolved without conflicts"
+    note_detail "$action_label" "resolved without conflicts"
     return 0
   fi
 
@@ -204,7 +215,7 @@ merge_branch_into_current() {
     die "$merge_output"
   fi
 
-  note "$action_label: conflicts detected, launching AI resolver"
+  note_detail "$action_label" "conflicts detected, launching AI resolver"
   if ! command -v opencode >/dev/null 2>&1; then
     warn "$action_label: opencode is required for AI conflict resolution, aborting"
     git -C "$target_root" merge --abort >/dev/null 2>&1 || true
@@ -221,7 +232,7 @@ merge_branch_into_current() {
     die "$action_title aborted: conflicts were not fully resolved"
   fi
 
-  note "$action_label: conflicts resolved by AI"
+  note_detail "$action_label" "conflicts resolved by AI"
 }
 
 resolve_current_worktree_index() {
@@ -249,12 +260,13 @@ merge_cleanup() {
   feature_root=$2
   feature_branch=$3
 
-  git -C "$main_root" worktree remove "$feature_root" \
+  run_command_with_dimmed_output git -C "$main_root" worktree remove "$feature_root" \
     || die "Failed to remove worktree: $feature_root"
-  note "removed_worktree: $feature_root"
+  note_section "Removed"
+  note_detail "removed_worktree" "$feature_root"
 
-  if git -C "$main_root" branch -d "$feature_branch" >/dev/null 2>&1; then
-    note "removed_branch: $feature_branch"
+  if run_command_with_dimmed_output git -C "$main_root" branch -d "$feature_branch"; then
+    note_detail "removed_branch" "$feature_branch"
   else
     warn "branch_retained: $feature_branch"
   fi
@@ -278,17 +290,21 @@ cmd_merge() {
   [ "$feature_branch" != "HEAD" ] || die "Cannot merge: current worktree has a detached HEAD"
   [ "$(git_dirty_state "$feature_root")" = "clean" ] || die "Cannot merge: worktree has uncommitted changes"
 
+  note_section "Merge"
+  note_detail "primary_branch" "$primary_branch"
+  note_detail "feature_branch" "$feature_branch"
+
   unique_commits=$(git -C "$feature_root" log "$primary_branch..$feature_branch" --oneline 2>/dev/null || true)
   [ -n "$unique_commits" ] || die "Cannot merge: no commits ahead of $primary_branch"
 
   if git -C "$main_root" merge --ff-only "$feature_branch" >/dev/null 2>&1; then
-    note "merge: fast-forward"
+    note_detail "merge" "fast-forward"
   else
     merge_branch_into_current "$feature_root" "$feature_branch" "$primary_branch" "merge" "Merge"
 
     git -C "$main_root" merge --ff-only "$feature_branch" >/dev/null 2>&1 \
       || die "Unexpected: fast-forward failed after reverse merge"
-    note "merge: primary updated"
+    note_detail "merge" "primary updated"
   fi
 
   merge_cleanup "$main_root" "$feature_root" "$feature_branch"
@@ -312,11 +328,15 @@ cmd_sync() {
   [ "$feature_branch" != "HEAD" ] || die "Cannot sync: current worktree has a detached HEAD"
   [ "$(git_dirty_state "$feature_root")" = "clean" ] || die "Cannot sync: worktree has uncommitted changes"
 
+  note_section "Sync"
+  note_detail "primary_branch" "$primary_branch"
+  note_detail "feature_branch" "$feature_branch"
+
   incoming_commits=$(git -C "$feature_root" log "$feature_branch..$primary_branch" --oneline 2>/dev/null || true)
   [ -n "$incoming_commits" ] || die "Cannot sync: no commits ahead on $primary_branch"
 
   if git -C "$feature_root" merge --ff-only "$primary_branch" >/dev/null 2>&1; then
-    note "sync: fast-forward"
+    note_detail "sync" "fast-forward"
     return 0
   fi
 

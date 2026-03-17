@@ -17,6 +17,103 @@ note() {
   printf '%s\n' "$*"
 }
 
+WT_STDOUT_STYLE_ENABLED=""
+
+init_stdout_style() {
+  if [ -n "$WT_STDOUT_STYLE_ENABLED" ]; then
+    return 0
+  fi
+
+  if [ "${WT_FORCE_STDOUT_STYLE:-0}" = "1" ] && [ -z "${NO_COLOR-}" ]; then
+    WT_STDOUT_STYLE_ENABLED=1
+  elif [ -t 1 ] && [ -z "${NO_COLOR-}" ]; then
+    WT_STDOUT_STYLE_ENABLED=1
+  else
+    WT_STDOUT_STYLE_ENABLED=0
+  fi
+}
+
+stdout_supports_color() {
+  init_stdout_style
+  [ "$WT_STDOUT_STYLE_ENABLED" = "1" ]
+}
+
+style_line() {
+  local code text
+  code=$1
+  text=$2
+
+  if stdout_supports_color; then
+    printf '\033[%sm%s\033[0m' "$code" "$text"
+  else
+    printf '%s' "$text"
+  fi
+}
+
+note_section() {
+  local prefix
+  init_stdout_style
+  printf '\n'
+  style_line "1;36" "==>"
+  printf ' %s\n' "$1"
+}
+
+note_detail() {
+  init_stdout_style
+  if stdout_supports_color; then
+    printf '  '
+    style_line "0" "$1: $2"
+    printf '\n'
+  else
+    printf '  %s: %s\n' "$1" "$2"
+  fi
+}
+
+note_list_item() {
+  init_stdout_style
+  if stdout_supports_color; then
+    printf '    '
+    style_line "2" "- $1"
+    printf '\n'
+  else
+    printf '    - %s\n' "$1"
+  fi
+}
+
+note_status() {
+  init_stdout_style
+  if stdout_supports_color; then
+    printf '  '
+    style_line "0" "-> $1"
+    printf '\n'
+  else
+    printf '  -> %s\n' "$1"
+  fi
+}
+
+run_command_with_dimmed_output() {
+  if stdout_supports_color; then
+    "$@" 2>&1 | while IFS= read -r line; do
+      style_line "2" "$line"
+      printf '\n'
+    done
+    return ${PIPESTATUS[0]}
+  fi
+
+  "$@"
+}
+
+note_command() {
+  init_stdout_style
+  if stdout_supports_color; then
+    printf '  '
+    style_line "1;32" "$1"
+    printf '\n'
+  else
+    printf '  %s\n' "$1"
+  fi
+}
+
 warn() {
   printf '%s\n' "$*" >&2
 }
