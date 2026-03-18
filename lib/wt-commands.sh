@@ -507,7 +507,7 @@ merge_branch_into_current() {
   fi
 
   opencode "$target_root" --agent "Maat" --model "$WT_MERGE_MODEL" \
-    --prompt "Merge conflicts need to be resolved. Branch '$current_branch' is merging '$incoming_branch'. Examine the conflicts, resolve them, stage the files, and run 'GIT_EDITOR=true git merge --continue'." \
+    --prompt "Merge conflicts need to be resolved. Branch '$current_branch' is merging '$incoming_branch'. Prefer the current branch/worktree side as the default source of truth because it represents the worktree-local branch state the user is actively editing. Only take incoming-branch changes when they combine cleanly without undermining the current branch intent. If any conflict is ambiguous, use the question tool instead of guessing. Examine the conflicts, resolve them, stage the files, and run 'GIT_EDITOR=true git merge --continue'." \
     || true
 
   if merge_head_exists "$target_root"; then

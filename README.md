@@ -140,7 +140,7 @@ The merge strategy is:
 
 1. If the primary branch has no new commits, fast-forward directly.
 2. Otherwise, merge the primary branch into the feature branch first (reverse merge) to keep the feature branch safe from conflicts, then fast-forward the primary branch.
-3. If the reverse merge produces conflicts, OpenCode (with the Maat agent) is launched to resolve them automatically. If AI resolution fails, the merge is aborted cleanly and the worktree is left intact.
+3. If the reverse merge produces conflicts, OpenCode (with the Maat agent) is launched to resolve them automatically. Maat is instructed to prefer the current worktree side when a conflict cannot be cleanly combined, and to ask a question instead of guessing when the right resolution is unclear. If AI resolution fails, the merge is aborted cleanly and the worktree is left intact.
 
 ### `wt sync`
 
@@ -154,7 +154,7 @@ The sync strategy is:
 
 1. If the current worktree branch can be fast-forwarded to the primary branch, do that directly.
 2. Otherwise, merge the primary branch into the current worktree branch.
-3. If that merge produces conflicts, OpenCode (with the Maat agent) is launched to resolve them automatically. If AI resolution fails, the merge is aborted cleanly and the worktree is left intact.
+3. If that merge produces conflicts, OpenCode (with the Maat agent) is launched to resolve them automatically. Maat is instructed to prefer the current worktree side when a conflict cannot be cleanly combined, and to ask a question instead of guessing when the right resolution is unclear. If AI resolution fails, the merge is aborted cleanly and the worktree is left intact.
 
 ### `wt rm [--force] [branch-or-handle]`
 

@@ -365,6 +365,17 @@ make_fake_opencode_merge_bin() {
 #!/usr/bin/env bash
 set -euo pipefail
 
+python3 - "${WT_TEST_OPENCODE_LOG-}" "$@" <<'PY'
+import json
+import sys
+
+log_path = sys.argv[1]
+args = sys.argv[2:]
+if log_path:
+    with open(log_path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(args) + "\n")
+PY
+
 target_dir=${1-}
 
 [ -n "$target_dir" ] || exit 1
@@ -1933,7 +1944,7 @@ test_merge_refuses_when_primary_worktree_is_detached_head() {
 }
 
 test_merge_with_conflicts_ai_resolves() {
-  local repo worktree fake_bin output
+  local repo worktree fake_bin opencode_log output prompt_log resolved_contents
   repo=$(make_repo)
   configure_repo_for_merge "$repo"
 
@@ -1951,15 +1962,21 @@ test_merge_with_conflicts_ai_resolves() {
   commit_repo_state "$repo" "primary change to shared"
 
   fake_bin=$(make_fake_opencode_merge_bin)
+  opencode_log=$(mktemp)
 
-  output=$(cd "$worktree" && PATH="$fake_bin:$PATH" bash "$ROOT/bin/wt" merge 2>&1)
+  output=$(cd "$worktree" && WT_TEST_OPENCODE_LOG="$opencode_log" PATH="$fake_bin:$PATH" bash "$ROOT/bin/wt" merge 2>&1)
+  prompt_log=$(cat "$opencode_log")
+  resolved_contents=$(cat "$repo/shared.txt")
 
   assert_contains "$output" "merge: conflicts detected" "wt merge should detect conflicts"
   assert_contains "$output" "merge: conflicts resolved by AI" "wt merge should report AI resolution"
+  assert_contains "$prompt_log" "Prefer the current branch/worktree side as the default source of truth" "wt merge should tell Maat to prefer worktree-side changes"
+  assert_contains "$prompt_log" "If any conflict is ambiguous, use the question tool instead of guessing" "wt merge should tell Maat to ask questions when uncertain"
   assert_contains "$output" "removed_worktree:" "wt merge should remove the worktree after AI resolution"
   assert_contains "$output" "removed_branch: feature/test" "wt merge should delete the branch after AI resolution"
   assert_file_missing "$worktree" "wt merge should remove the worktree directory after AI resolution"
   assert_file_exists "$repo/shared.txt" "the primary branch should contain the shared file after AI merge"
+  assert_eq "feature change" "$resolved_contents" "wt merge should keep the worktree-side change when AI resolves a content conflict"
 }
 
 test_merge_with_conflicts_ai_fails() {
@@ -2168,7 +2185,7 @@ test_sync_refuses_when_primary_worktree_is_detached_head() {
 }
 
 test_sync_with_conflicts_ai_resolves() {
-  local repo worktree fake_bin output
+  local repo worktree fake_bin opencode_log output prompt_log resolved_contents
   repo=$(make_repo)
   configure_repo_for_merge "$repo"
 
@@ -2186,12 +2203,18 @@ test_sync_with_conflicts_ai_resolves() {
   commit_repo_state "$repo" "primary change to shared"
 
   fake_bin=$(make_fake_opencode_merge_bin)
+  opencode_log=$(mktemp)
 
-  output=$(cd "$worktree" && PATH="$fake_bin:$PATH" bash "$ROOT/bin/wt" sync 2>&1)
+  output=$(cd "$worktree" && WT_TEST_OPENCODE_LOG="$opencode_log" PATH="$fake_bin:$PATH" bash "$ROOT/bin/wt" sync 2>&1)
+  prompt_log=$(cat "$opencode_log")
+  resolved_contents=$(cat "$worktree/shared.txt")
 
   assert_contains "$output" "sync: conflicts detected" "wt sync should detect conflicts"
   assert_contains "$output" "sync: conflicts resolved by AI" "wt sync should report AI resolution"
+  assert_contains "$prompt_log" "Prefer the current branch/worktree side as the default source of truth" "wt sync should tell Maat to prefer worktree-side changes"
+  assert_contains "$prompt_log" "If any conflict is ambiguous, use the question tool instead of guessing" "wt sync should tell Maat to ask questions when uncertain"
   assert_file_exists "$worktree/shared.txt" "wt sync should keep the worktree after resolving conflicts"
+  assert_eq "feature change" "$resolved_contents" "wt sync should keep the worktree-side change when AI resolves a content conflict"
 }
 
 test_sync_with_conflicts_ai_fails() {
