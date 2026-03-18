@@ -194,6 +194,17 @@ append_worktree_record() {
   WT_COUNT=$((WT_COUNT + 1))
 }
 
+worktree_state_has() {
+  local state flag
+  state=$1
+  flag=$2
+
+  case ",$state," in
+    *,$flag,*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 list_worktrees() {
   local repo_root worktree_root entry path branch annotation token key value
   repo_root=$(get_main_repo_root)
@@ -254,6 +265,25 @@ list_worktrees() {
   if [ -n "$path" ]; then
     append_worktree_record "$repo_root" "$worktree_root" "$path" "$branch" "$annotation"
   fi
+}
+
+resolve_worktree_index_by_path() {
+  local target_path i
+  target_path=$1
+
+  list_worktrees
+  WT_TARGET_INDEX=""
+
+  i=0
+  while [ $i -lt $WT_COUNT ]; do
+    if [ "${WT_PATHS[$i]}" = "$target_path" ]; then
+      WT_TARGET_INDEX=$i
+      return 0
+    fi
+    i=$((i + 1))
+  done
+
+  die "Unable to resolve the requested worktree path: $target_path"
 }
 
 ensure_unique_handle() {

@@ -120,10 +120,13 @@ warn() {
 
 print_help() {
   cat <<'EOF'
-wt - thin git worktree helper for Node.js repositories
+wt - thin git worktree helper for local Git repositories
 
 Usage:
   wt new [branch]
+  wt status [branch-or-handle]
+  wt diff [branch-or-handle]
+  wt prune [--dry-run]
   wt init
   wt b [branch-or-handle]
   wt cd <branch-or-handle>
@@ -136,6 +139,9 @@ Usage:
 
 Commands:
   new    Create or attach a worktree; with no branch, ask and suggest one
+  status Show worktree state and primary-branch relation
+  diff   Show committed changes against the current primary branch
+  prune  Remove stale linked worktree metadata conservatively
   init   Generate or update .vscode/launch.json for the current worktree
   b      Open the current or requested worktree in the debug browser
   cd     Print the absolute path for a linked worktree

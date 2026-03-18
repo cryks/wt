@@ -1,3 +1,62 @@
+WT_PRIMARY_COMPARE_REF=""
+WT_PRIMARY_COMPARE_LABEL=""
+WT_TARGET_COMPARE_REF=""
+WT_TARGET_COMPARE_LABEL=""
+WT_RELATION_BEHIND=0
+WT_RELATION_AHEAD=0
+
+resolve_primary_compare_ref() {
+  local main_root branch head short_head
+  main_root=$1
+
+  branch=$(git -C "$main_root" branch --show-current 2>/dev/null || true)
+  if [ -n "$branch" ]; then
+    WT_PRIMARY_COMPARE_REF=$branch
+    WT_PRIMARY_COMPARE_LABEL=$branch
+    return 0
+  fi
+
+  head=$(git -C "$main_root" rev-parse --verify HEAD) || die "Unable to resolve the current primary HEAD from: $main_root"
+  short_head=$(git -C "$main_root" rev-parse --short "$head")
+  WT_PRIMARY_COMPARE_REF=$head
+  WT_PRIMARY_COMPARE_LABEL="HEAD ($short_head)"
+}
+
+resolve_worktree_compare_ref() {
+  local index target_path target_branch head short_head
+  index=$1
+  target_path=${WT_PATHS[$index]}
+  target_branch=${WT_BRANCHES[$index]}
+
+  if [ "$target_branch" != "HEAD" ]; then
+    WT_TARGET_COMPARE_REF=$target_branch
+    WT_TARGET_COMPARE_LABEL=$target_branch
+    return 0
+  fi
+
+  if [ -d "$target_path" ]; then
+    head=$(git -C "$target_path" rev-parse --verify HEAD) || die "Unable to resolve HEAD for worktree: $target_path"
+    short_head=$(git -C "$target_path" rev-parse --short "$head")
+    WT_TARGET_COMPARE_REF=$head
+    WT_TARGET_COMPARE_LABEL="HEAD ($short_head)"
+    return 0
+  fi
+
+  WT_TARGET_COMPARE_REF=""
+  WT_TARGET_COMPARE_LABEL="HEAD (missing)"
+}
+
+compute_branch_relation() {
+  local repo_root compare_ref target_ref
+  repo_root=$1
+  compare_ref=$2
+  target_ref=$3
+
+  set -- $(git -C "$repo_root" rev-list --left-right --count "$compare_ref...$target_ref")
+  WT_RELATION_BEHIND=${1:-0}
+  WT_RELATION_AHEAD=${2:-0}
+}
+
 cmd_open() {
   print_worktree_target_path "$@"
 }
@@ -32,6 +91,231 @@ cmd_ls() {
   while [ $i -lt $WT_COUNT ]; do
     format_table_row "$width_branch" "$width_handle" "$width_type" "$width_state" \
       "${WT_BRANCHES[$i]}" "${WT_HANDLES[$i]}" "${WT_TYPES[$i]}" "${WT_STATES[$i]}" "${WT_PATHS[$i]}"
+    i=$((i + 1))
+  done
+}
+
+cmd_status() {
+  local target_root index main_root i linked_count stale_count sync_status merge_status
+
+  [ $# -le 1 ] || die "Usage: wt status [branch-or-handle]"
+  require_git_repo
+
+  target_root=$(resolve_target_root_or_current "$@")
+  resolve_worktree_index_by_path "$target_root"
+  index=$WT_TARGET_INDEX
+  main_root=$(get_main_repo_root)
+
+  note_section "Status"
+  note_detail "worktree_path" "${WT_PATHS[$index]}"
+  note_detail "type" "${WT_TYPES[$index]}"
+  note_detail "branch" "${WT_BRANCHES[$index]}"
+  if [ "${WT_HANDLES[$index]}" != "-" ]; then
+    note_detail "handle" "${WT_HANDLES[$index]}"
+  fi
+  note_detail "state" "${WT_STATES[$index]}"
+
+  if [ "${WT_TYPES[$index]}" = "primary" ]; then
+    linked_count=0
+    stale_count=0
+    i=0
+    while [ $i -lt $WT_COUNT ]; do
+      if [ "${WT_TYPES[$i]}" = "linked" ]; then
+        linked_count=$((linked_count + 1))
+        if worktree_state_has "${WT_STATES[$i]}" "missing" || worktree_state_has "${WT_STATES[$i]}" "prunable"; then
+          stale_count=$((stale_count + 1))
+        fi
+      fi
+      i=$((i + 1))
+    done
+    note_detail "linked_worktrees" "$linked_count"
+    note_detail "stale_worktrees" "$stale_count"
+    return 0
+  fi
+
+  resolve_primary_compare_ref "$main_root"
+  resolve_worktree_compare_ref "$index"
+  note_detail "primary_ref" "$WT_PRIMARY_COMPARE_LABEL"
+
+  if [ -z "$WT_TARGET_COMPARE_REF" ]; then
+    note_detail "ahead_of_primary" "unavailable"
+    note_detail "behind_primary" "unavailable"
+    note_detail "sync_status" "blocked-missing-detached-head"
+    note_detail "merge_status" "blocked-missing-detached-head"
+    return 0
+  fi
+
+  compute_branch_relation "$main_root" "$WT_PRIMARY_COMPARE_REF" "$WT_TARGET_COMPARE_REF"
+  note_detail "ahead_of_primary" "$WT_RELATION_AHEAD"
+  note_detail "behind_primary" "$WT_RELATION_BEHIND"
+
+  if [ "${WT_BRANCHES[$index]}" = "HEAD" ]; then
+    sync_status="blocked-detached-head"
+    merge_status="blocked-detached-head"
+  elif worktree_state_has "${WT_STATES[$index]}" "dirty"; then
+    sync_status="blocked-dirty"
+    merge_status="blocked-dirty"
+  else
+    if [ "$WT_RELATION_BEHIND" -eq 0 ]; then
+      sync_status="up-to-date"
+    elif [ "$WT_RELATION_AHEAD" -eq 0 ]; then
+      sync_status="fast-forward"
+    else
+      sync_status="merge-required"
+    fi
+
+    if [ "$WT_RELATION_AHEAD" -eq 0 ]; then
+      merge_status="no-commits-ahead"
+    elif [ "$WT_RELATION_BEHIND" -eq 0 ]; then
+      merge_status="fast-forward"
+    else
+      merge_status="reverse-merge-required"
+    fi
+  fi
+
+  note_detail "sync_status" "$sync_status"
+  note_detail "merge_status" "$merge_status"
+}
+
+cmd_diff() {
+  local target_root index main_root commit_summary line
+
+  [ $# -le 1 ] || die "Usage: wt diff [branch-or-handle]"
+  require_git_repo
+
+  target_root=$(resolve_target_root_or_current "$@")
+  resolve_worktree_index_by_path "$target_root"
+  index=$WT_TARGET_INDEX
+  [ "${WT_TYPES[$index]}" != "primary" ] || die "Cannot diff: already on the primary worktree; pass a branch or handle"
+  [ "$(git_dirty_state "$target_root")" = "clean" ] || die "Cannot diff: worktree has uncommitted changes"
+
+  main_root=$(get_main_repo_root)
+  resolve_primary_compare_ref "$main_root"
+  resolve_worktree_compare_ref "$index"
+  [ -n "$WT_TARGET_COMPARE_REF" ] || die "Cannot diff: a missing detached worktree cannot be compared"
+  compute_branch_relation "$main_root" "$WT_PRIMARY_COMPARE_REF" "$WT_TARGET_COMPARE_REF"
+
+  note_section "Diff"
+  note_detail "worktree_path" "${WT_PATHS[$index]}"
+  note_detail "branch" "${WT_BRANCHES[$index]}"
+  if [ "${WT_HANDLES[$index]}" != "-" ]; then
+    note_detail "handle" "${WT_HANDLES[$index]}"
+  fi
+  note_detail "state" "${WT_STATES[$index]}"
+  note_detail "primary_ref" "$WT_PRIMARY_COMPARE_LABEL"
+  note_detail "target_ref" "$WT_TARGET_COMPARE_LABEL"
+  note_detail "ahead_of_primary" "$WT_RELATION_AHEAD"
+  note_detail "behind_primary" "$WT_RELATION_BEHIND"
+
+  if git -C "$main_root" diff --quiet "$WT_PRIMARY_COMPARE_REF...$WT_TARGET_COMPARE_REF" --; then
+    note_detail "diff" "no changes against primary"
+    return 0
+  fi
+
+  commit_summary=$(git -C "$main_root" log --oneline "$WT_PRIMARY_COMPARE_REF..$WT_TARGET_COMPARE_REF" 2>/dev/null || true)
+  if [ -n "$commit_summary" ]; then
+    note_section "Commits"
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      note_status "$line"
+    done <<EOF
+$commit_summary
+EOF
+  fi
+
+  note_section "Patch"
+  run_command_with_dimmed_output git -C "$main_root" --no-pager diff "$WT_PRIMARY_COMPARE_REF...$WT_TARGET_COMPARE_REF"
+}
+
+cmd_prune() {
+  local dry_run main_root i state
+  local -a stale_paths stale_states locked_paths locked_states cmd
+
+  dry_run=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run)
+        dry_run=1
+        ;;
+      --help|-h)
+        printf '%s\n' "Usage: wt prune [--dry-run]"
+        return 0
+        ;;
+      *)
+        die "Usage: wt prune [--dry-run]"
+        ;;
+    esac
+    shift
+  done
+
+  require_git_repo
+  main_root=$(get_main_repo_root)
+  list_worktrees
+
+  i=0
+  while [ $i -lt $WT_COUNT ]; do
+    state=${WT_STATES[$i]}
+    if [ "${WT_TYPES[$i]}" = "linked" ] && { worktree_state_has "$state" "missing" || worktree_state_has "$state" "prunable"; }; then
+      if worktree_state_has "$state" "locked"; then
+        locked_paths+=("${WT_PATHS[$i]}")
+        locked_states+=("$state")
+      else
+        stale_paths+=("${WT_PATHS[$i]}")
+        stale_states+=("$state")
+      fi
+    fi
+    i=$((i + 1))
+  done
+
+  note_section "Prune"
+  if [ $dry_run -eq 1 ]; then
+    note_detail "dry_run" "true"
+  fi
+
+  if [ ${#stale_paths[@]} -eq 0 ]; then
+    note_detail "prune" "nothing to do"
+    if [ ${#locked_paths[@]} -gt 0 ]; then
+      note_detail "skipped_locked" "${#locked_paths[@]}"
+      i=0
+      while [ $i -lt ${#locked_paths[@]} ]; do
+        note_list_item "locked: ${locked_paths[$i]} (${locked_states[$i]})"
+        i=$((i + 1))
+      done
+    fi
+    return 0
+  fi
+
+  note_detail "stale_worktrees" "${#stale_paths[@]}"
+  i=0
+  while [ $i -lt ${#stale_paths[@]} ]; do
+    note_list_item "stale: ${stale_paths[$i]} (${stale_states[$i]})"
+    i=$((i + 1))
+  done
+
+  if [ ${#locked_paths[@]} -gt 0 ]; then
+    note_detail "skipped_locked" "${#locked_paths[@]}"
+    i=0
+    while [ $i -lt ${#locked_paths[@]} ]; do
+      note_list_item "locked: ${locked_paths[$i]} (${locked_states[$i]})"
+      i=$((i + 1))
+    done
+  fi
+
+  cmd=(git -C "$main_root" worktree prune --expire now --verbose)
+  if [ $dry_run -eq 1 ]; then
+    cmd+=(--dry-run)
+  fi
+  run_command_with_dimmed_output "${cmd[@]}"
+
+  if [ $dry_run -eq 1 ]; then
+    return 0
+  fi
+
+  note_section "Pruned"
+  note_detail "pruned_worktrees" "${#stale_paths[@]}"
+  i=0
+  while [ $i -lt ${#stale_paths[@]} ]; do
+    note_list_item "pruned: ${stale_paths[$i]}"
     i=$((i + 1))
   done
 }
@@ -236,22 +520,7 @@ merge_branch_into_current() {
 }
 
 resolve_current_worktree_index() {
-  local repo_root i index
-  repo_root=$(get_repo_root)
-
-  list_worktrees
-  index=""
-  i=0
-  while [ $i -lt $WT_COUNT ]; do
-    if [ "${WT_PATHS[$i]}" = "$repo_root" ]; then
-      index=$i
-      break
-    fi
-    i=$((i + 1))
-  done
-
-  [ -n "$index" ] || die "Unable to resolve the current worktree"
-  WT_TARGET_INDEX=$index
+  resolve_worktree_index_by_path "$(get_repo_root)"
 }
 
 merge_cleanup() {

@@ -49,6 +49,18 @@ main() {
       shift
       cmd_open "$@"
       ;;
+    status)
+      shift
+      cmd_status "$@"
+      ;;
+    diff)
+      shift
+      cmd_diff "$@"
+      ;;
+    prune)
+      shift
+      cmd_prune "$@"
+      ;;
     merge)
       shift
       cmd_merge "$@"

@@ -77,6 +77,25 @@ This design ensures the primary branch never has a dirty merge commit — the fe
 
 `wt sync` reuses the same branch-integration path in the opposite user flow: it merges the primary branch into the current linked worktree, but does not remove the worktree or delete the branch afterward. `cmd_sync` first tries `git merge --ff-only <primary-branch>` in the current worktree, then falls back to the shared `merge_branch_into_current` helper for non-fast-forward merges and AI conflict resolution.
 
+### Status and diff comparisons follow the current primary checkout
+
+`wt status` and `wt diff` do NOT hardcode `main` or `master`. They compare linked worktrees against whatever branch is currently checked out in the primary worktree, and fall back to the primary `HEAD` commit when the primary checkout is detached.
+
+- `wt status` on a linked worktree reports ahead/behind counts plus `sync_status` / `merge_status` derived from that current primary reference.
+- `wt status` on the primary worktree switches modes and reports linked/stale worktree counts instead of branch comparison data.
+- `wt diff` uses the merge-base form `primary...target`, so the patch shows target-side committed changes only, even when the primary branch has moved ahead.
+
+This keeps review-style commands aligned with the same primary-worktree semantics already used by `wt merge` and `wt sync`.
+
+### Stale worktree cleanup via `wt prune`
+
+`wt prune` is a conservative wrapper around `git worktree prune --expire now`.
+
+- Candidate detection comes from the same `list_worktrees` state model used by `wt ls` and `wt status`.
+- It only targets linked worktrees whose state includes `missing` or `prunable`.
+- Locked entries are reported but skipped.
+- Branch refs are intentionally left alone; `wt prune` only cleans Git's stale worktree metadata.
+
 ### OpenCode integration points
 
 There are three distinct OpenCode integration points, each using a different model and protocol:
@@ -110,9 +129,10 @@ The actual URL is obtained by running `portless get <name>` inside the worktree 
 - Tests that require an interactive terminal use `run_in_pty`, which spawns a pseudo-terminal via Python.
 - Terminal output with ANSI escape sequences is rendered via `render_terminal_output` for assertions.
 - `wt new` output tests should preserve both layers of the contract: human-readable headings like `Worktree` / `Created worktree` / `Bootstrap`, and stable machine-readable `key: value` lines such as `worktree_path:` and `branch:`.
-- Workflow command output (`wt init`, `wt b`, `wt merge`, `wt sync`, `wt rm`) may also use section headings so long as existing machine-readable lines and wrapper contracts remain intact.
+- Workflow command output (`wt status`, `wt diff`, `wt prune`, `wt init`, `wt b`, `wt merge`, `wt sync`, `wt rm`) may also use section headings so long as existing machine-readable lines and wrapper contracts remain intact.
 - Visible subprocess output within workflow commands should be dimmed in TTY mode so `wt` summary lines remain visually primary.
 - PTY-oriented `wt new` tests may assert ANSI-colored output via raw capture and then use `render_terminal_output` to normalize escape sequences before checking the rendered text.
+- Missing/prunable stale-state tests may remove a linked worktree directory directly to let Git report it as stale, and locked-state tests may combine `git worktree lock` with that missing-path setup.
 - Tests create temporary Git repositories with `make_repo` and clean up automatically (they live in `/tmp`).
 - All test functions are listed at the bottom of the file and run sequentially.
 - To run: `bash tests/smoke.sh`

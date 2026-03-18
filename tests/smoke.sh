@@ -1331,6 +1331,192 @@ test_rm_explicit_target_leaves_unmerged_branch_when_branch_delete_fails() {
   assert_contains "$output" "Removed worktree but failed to delete branch with git branch -d: feature/test" "wt rm should explain partial branch deletion failure"
 }
 
+test_help_includes_status_prune_diff() {
+  local output
+
+  output=$(bash "$ROOT/bin/wt" --help)
+
+  assert_contains "$output" "wt status [branch-or-handle]" "wt help should include the status command"
+  assert_contains "$output" "wt diff [branch-or-handle]" "wt help should include the diff command"
+  assert_contains "$output" "wt prune [--dry-run]" "wt help should include the prune command"
+}
+
+test_status_reports_linked_worktree_relation() {
+  local repo worktree output
+  repo=$(make_repo)
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  printf 'feature\n' >"$worktree/feature.txt"
+  commit_repo_state "$worktree" "feature commit"
+
+  printf 'primary\n' >"$repo/primary.txt"
+  commit_repo_state "$repo" "primary commit"
+
+  output=$(cd "$worktree" && bash "$ROOT/bin/wt" status)
+
+  assert_contains "$output" "Status" "wt status should print a dedicated status section"
+  assert_contains "$output" "primary_ref: main" "wt status should report the current primary branch"
+  assert_contains "$output" "ahead_of_primary: 1" "wt status should report feature commits ahead of primary"
+  assert_contains "$output" "behind_primary: 1" "wt status should report primary commits not yet synced"
+  assert_contains "$output" "sync_status: merge-required" "wt status should describe a non-fast-forward sync"
+  assert_contains "$output" "merge_status: reverse-merge-required" "wt status should describe a non-fast-forward merge"
+}
+
+test_status_reports_primary_stale_worktree_counts() {
+  local repo worktree output
+  repo=$(make_repo)
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+  rm -rf "$worktree"
+
+  output=$(cd "$repo" && bash "$ROOT/bin/wt" status)
+
+  assert_contains "$output" "type: primary" "wt status on the main checkout should mark it as primary"
+  assert_contains "$output" "linked_worktrees: 1" "wt status should count linked worktrees from the primary checkout"
+  assert_contains "$output" "stale_worktrees: 1" "wt status should count stale linked worktrees from the primary checkout"
+}
+
+test_status_uses_current_primary_branch_when_primary_switches() {
+  local repo worktree output primary_branch
+  repo=$(make_repo trunk)
+  git -C "$repo" switch -c release/1.0 >/dev/null
+  primary_branch=$(repo_primary_branch "$repo")
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  printf 'feature\n' >"$worktree/feature.txt"
+  commit_repo_state "$worktree" "feature commit"
+
+  printf 'release\n' >"$repo/release.txt"
+  commit_repo_state "$repo" "release commit"
+
+  output=$(cd "$worktree" && bash "$ROOT/bin/wt" status)
+
+  assert_eq "release/1.0" "$primary_branch" "test setup should switch the primary worktree to a non-default branch"
+  assert_contains "$output" "primary_ref: release/1.0" "wt status should follow the currently checked out primary branch"
+}
+
+test_prune_noops_when_no_stale_entries_exist() {
+  local repo worktree output worktree_list
+  repo=$(make_repo)
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  output=$(cd "$repo" && bash "$ROOT/bin/wt" prune)
+  worktree_list=$(git -C "$repo" worktree list --porcelain)
+
+  assert_contains "$output" "Prune" "wt prune should print a dedicated prune section"
+  assert_contains "$output" "prune: nothing to do" "wt prune should report when there is no stale metadata to clean"
+  assert_contains "$worktree_list" "$worktree" "wt prune should leave live worktrees alone"
+}
+
+test_prune_dry_run_keeps_stale_worktree_metadata() {
+  local repo worktree output worktree_list
+  repo=$(make_repo)
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+  rm -rf "$worktree"
+
+  output=$(cd "$repo" && bash "$ROOT/bin/wt" prune --dry-run)
+  worktree_list=$(git -C "$repo" worktree list --porcelain)
+
+  assert_contains "$output" "dry_run: true" "wt prune --dry-run should report dry-run mode"
+  assert_contains "$output" "stale_worktrees: 1" "wt prune --dry-run should report stale entries"
+  assert_contains "$worktree_list" "$worktree" "wt prune --dry-run should keep stale metadata intact"
+}
+
+test_prune_removes_prunable_worktree_metadata_only() {
+  local repo stale_worktree keep_worktree output worktree_list
+  repo=$(make_repo)
+  stale_worktree="${repo}__worktrees/feature-test"
+  keep_worktree="${repo}__worktrees/feature-keep"
+  git -C "$repo" worktree add "$stale_worktree" -b feature/test >/dev/null
+  git -C "$repo" worktree add "$keep_worktree" -b feature/keep >/dev/null
+  rm -rf "$stale_worktree"
+
+  output=$(cd "$repo" && bash "$ROOT/bin/wt" prune)
+  worktree_list=$(git -C "$repo" worktree list --porcelain)
+
+  assert_contains "$output" "Pruned" "wt prune should print a completion section after cleaning stale metadata"
+  assert_contains "$output" "pruned_worktrees: 1" "wt prune should report how many stale worktrees it removed"
+  assert_not_contains "$worktree_list" "$stale_worktree" "wt prune should remove stale worktree metadata"
+  assert_contains "$worktree_list" "$keep_worktree" "wt prune should leave live worktrees registered"
+  if ! git -C "$repo" show-ref --verify --quiet refs/heads/feature/test; then
+    fail "wt prune should not delete the stale branch ref"
+  fi
+}
+
+test_prune_skips_locked_stale_worktree() {
+  local repo worktree output worktree_list
+  repo=$(make_repo)
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+  git -C "$repo" worktree lock "$worktree" >/dev/null
+  rm -rf "$worktree"
+
+  output=$(cd "$repo" && bash "$ROOT/bin/wt" prune)
+  worktree_list=$(git -C "$repo" worktree list --porcelain)
+
+  assert_contains "$output" "prune: nothing to do" "wt prune should not attempt locked stale worktrees"
+  assert_contains "$output" "skipped_locked: 1" "wt prune should report locked stale worktrees separately"
+  assert_contains "$worktree_list" "$worktree" "wt prune should leave locked stale worktree metadata in place"
+}
+
+test_diff_pins_feature_vs_primary_direction() {
+  local repo worktree output
+  repo=$(make_repo)
+  printf 'base\n' >"$repo/shared.txt"
+  commit_repo_state "$repo" "add base"
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  printf 'primary\n' >"$repo/shared.txt"
+  commit_repo_state "$repo" "primary commit"
+
+  printf 'feature\n' >"$worktree/shared.txt"
+  commit_repo_state "$worktree" "feature commit"
+
+  output=$(cd "$worktree" && bash "$ROOT/bin/wt" diff)
+
+  assert_contains "$output" "Diff" "wt diff should print a dedicated diff section"
+  assert_contains "$output" "Commits" "wt diff should list target-only commits when they exist"
+  assert_contains "$output" "Patch" "wt diff should print a dedicated patch section"
+  assert_contains "$output" "+feature" "wt diff should show the feature-side change"
+  assert_not_contains "$output" "+primary" "wt diff should compare feature changes against the merge base, not primary-only lines"
+}
+
+test_diff_refuses_dirty_worktree() {
+  local repo worktree output
+  repo=$(make_repo)
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+  touch "$worktree/dirty.txt"
+
+  if output=$(cd "$worktree" && bash "$ROOT/bin/wt" diff 2>&1); then
+    fail "wt diff should refuse a dirty worktree"
+  fi
+
+  assert_contains "$output" "Cannot diff: worktree has uncommitted changes" "wt diff should explain the dirty-worktree refusal"
+}
+
+test_diff_uses_current_primary_branch_when_primary_switches() {
+  local repo worktree output primary_branch
+  repo=$(make_repo trunk)
+  git -C "$repo" switch -c release/1.0 >/dev/null
+  primary_branch=$(repo_primary_branch "$repo")
+  worktree="${repo}__worktrees/feature-test"
+  git -C "$repo" worktree add "$worktree" -b feature/test >/dev/null
+
+  printf 'feature\n' >"$worktree/feature.txt"
+  commit_repo_state "$worktree" "feature commit"
+
+  output=$(cd "$worktree" && bash "$ROOT/bin/wt" diff)
+
+  assert_eq "release/1.0" "$primary_branch" "test setup should switch the primary worktree to a non-default branch"
+  assert_contains "$output" "primary_ref: release/1.0" "wt diff should follow the currently checked out primary branch"
+}
+
 test_ls_shows_branch_first() {
   local repo output header
   repo=$(make_repo)
@@ -2137,6 +2323,17 @@ test_wrapper_rm_without_args_works_from_non_main_primary_branch
 test_rm_explicit_target_deletes_clean_branch
 test_rm_explicit_target_dims_subprocess_output_in_pty
 test_rm_explicit_target_leaves_unmerged_branch_when_branch_delete_fails
+test_help_includes_status_prune_diff
+test_status_reports_linked_worktree_relation
+test_status_reports_primary_stale_worktree_counts
+test_status_uses_current_primary_branch_when_primary_switches
+test_prune_noops_when_no_stale_entries_exist
+test_prune_dry_run_keeps_stale_worktree_metadata
+test_prune_removes_prunable_worktree_metadata_only
+test_prune_skips_locked_stale_worktree
+test_diff_pins_feature_vs_primary_direction
+test_diff_refuses_dirty_worktree
+test_diff_uses_current_primary_branch_when_primary_switches
 test_ls_shows_branch_first
 test_ls_marks_primary_worktree_as_primary
 test_init_creates_launch_json_for_explicit_portless_name

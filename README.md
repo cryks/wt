@@ -59,7 +59,7 @@ During creation, `wt new` also copies local bootstrap entries from the primary c
 
 After creation, `wt new` prints a grouped human-readable summary with `Worktree`, `Created worktree`, and `Bootstrap` sections. The raw `git worktree add` messages are folded into that summary and streamed immediately instead of appearing only after later bootstrap steps finish. In an interactive terminal it also adds ANSI color, indentation, and copied-entry details to feel more like a CLI tool, while non-interactive output stays plain text. The existing parseable `key: value` lines such as `worktree_path: ...` remain in place so the shell wrapper can still extract the new worktree path.
 
-`wt init`, `wt b`, `wt merge`, `wt sync`, and `wt rm` use the same section-oriented output style so the CLI feels consistent across the main workflow commands. When these commands surface subprocess output, interactive terminals render that subprocess output dimmed so the higher-level `wt` summary stays visually primary.
+`wt status`, `wt diff`, `wt prune`, `wt init`, `wt b`, `wt merge`, `wt sync`, and `wt rm` use the same section-oriented output style so the CLI feels consistent across the main workflow commands. When these commands surface subprocess output, interactive terminals render that subprocess output dimmed so the higher-level `wt` summary stays visually primary.
 
 ```bash
 wt new feature/test
@@ -103,6 +103,31 @@ List the primary checkout and all linked worktrees with their branch, handle, ty
 wt ls
 ```
 
+### `wt status [branch-or-handle]`
+
+Show the current or requested worktree, including its state and relationship to the branch currently checked out in the primary worktree.
+
+- For linked worktrees, `wt status` shows ahead/behind counts plus `sync_status` and `merge_status` so you can see whether `wt sync` or `wt merge` would fast-forward, require a merge, or be blocked.
+- For the primary checkout, `wt status` shows how many linked worktrees exist and how many stale entries are currently missing or prunable.
+
+```bash
+wt status
+wt status feature/test
+```
+
+### `wt diff [branch-or-handle]`
+
+Show the committed changes for the current or requested linked worktree against the current primary branch, using the merge base as the comparison point. `wt diff` lists target-only commits first and then prints the patch.
+
+When run from the primary checkout, pass a `branch-or-handle` explicitly.
+
+```bash
+wt diff
+wt diff feature/test
+```
+
+`wt diff` refuses dirty worktrees because it compares committed branch state only.
+
 ### `wt merge`
 
 Merge the current linked worktree's branch into the branch currently checked out in the primary worktree, then clean up (remove the worktree and delete the branch).
@@ -142,6 +167,20 @@ wt rm --force                # remove even if dirty
 wt rm --force feature/test
 ```
 
+### `wt prune [--dry-run]`
+
+Clean up stale linked worktree metadata using `git worktree prune --expire now`.
+
+- Targets linked worktrees that are missing on disk or already marked prunable
+- Leaves branch refs alone
+- Skips locked entries conservatively
+- Supports `--dry-run` to preview the cleanup without changing Git metadata
+
+```bash
+wt prune
+wt prune --dry-run
+```
+
 ### `wt init`
 
 Generate or update `.vscode/launch.json` for the current worktree with a Chrome DevTools attach configuration derived from the portless URL.
@@ -169,6 +208,8 @@ wt b feature/test      # specific worktree
 - it refuses dirty worktrees unless you pass `--force`
 - when a removed linked worktree is clean, it also tries `git branch -d`; with `--force`, it uses `git branch -D`
 - it does not symlink `node_modules` or share generated framework directories
+- `wt status` reports linked worktree state relative to whatever branch is currently checked out in the primary checkout
+- `wt diff` compares committed target changes against the current primary branch and refuses dirty worktrees
 - `wt merge` refuses dirty worktrees and branches with no commits ahead
 - `wt merge` merges the primary branch into the feature branch first to keep it safe from conflicts
 - `wt merge` uses AI to resolve conflicts, and aborts cleanly if resolution fails
@@ -176,6 +217,7 @@ wt b feature/test      # specific worktree
 - `wt sync` refuses dirty worktrees and refuses to run when the primary branch has no commits ahead of the current linked branch
 - `wt sync` merges the primary branch into the current linked worktree and keeps that worktree in place
 - `wt sync` uses AI to resolve conflicts, and aborts cleanly if resolution fails
+- `wt prune` only removes stale linked worktree metadata, skips locked entries, and leaves branch refs intact
 - real `cd` behavior requires sourcing `shell/wt.bash`, because a subprocess cannot change the parent shell directory
 
 ## Package manager detection
